@@ -2,6 +2,7 @@
 size's files under inbox/ and nothing elsewhere, and a worked-on one is reported as it is."""
 
 from .checks import result, root_problem, seed_problem, task_root
+from .inventory import MAX_LIMIT, page_problem
 from .rules import COUNTS, INBOX, files_under, root_name
 from .rules_text import HEADINGS
 
@@ -23,6 +24,9 @@ def verify_output(input_value, output_value, workspace):
     root = task_root(workspace, input_value)
     if not root.is_dir():
         return result(False, f"{expected} was not made")
+    problem, _shown, _total = page_problem(expected, 0, MAX_LIMIT, output_value.inventory, workspace)
+    if problem:
+        return result(False, f"the inventory page it returns is wrong: {problem}")
     inbox = root / INBOX
     in_inbox = len(files_under(inbox)) if inbox.is_dir() else 0
     if output_value.files != in_inbox:

@@ -74,4 +74,5 @@ to its slug, then `-3`, and so on, to the first free path.
 `i` (the file's number, the same for the whole task even after it moves: `apply_plan` moves and
 deletes files by it), `path` (relative to root), `size` (bytes), `sha256`, `type` (sniffed), `ext`
 (as the name claims; empty for none), `exif`, `png`, `pdf`, `md` (the raw embedded values, or
-null), `mtime_utc` (`YYYY-MM-DDTHH:MM:SSZ`).
+null), `mtime_utc` (`YYYY-MM-DDTHH:MM:SSZ`). `unpack_inbox` returns the first page of the
+inventory with these rules; `inventory` returns any page.

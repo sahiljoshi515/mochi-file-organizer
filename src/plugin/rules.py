@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # How many files each size of messy folder holds.
-COUNTS = {"small": 60, "medium": 150, "large": 300}
+COUNTS = {"small": 45, "medium": 150, "large": 300}
 INBOX = "inbox"
 ORGANIZED = "organized"
 ROOT = re.compile(r"^file-organizer/(\d{1,9})-(small|medium|large)$")

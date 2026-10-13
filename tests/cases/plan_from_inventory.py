@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 VARIANTS = (
@@ -43,10 +44,21 @@ def harness_paths() -> tuple[Path, Path]:
 
 
 def rows_from(outputs: dict, names: list[str]) -> list[dict]:
+    """The inventory rows saved under `names`: inventory pages, or the page unpack_inbox returns."""
+    def page_of(block):
+        if isinstance(block.get("files"), list):
+            return block["files"]
+        if isinstance(block.get("inventory"), dict):
+            return block["inventory"]["files"]
+        return None
+
+    pages = [page_of(outputs[name]) for name in names if name in outputs]
+    pages = [page for page in pages if page is not None]
+    # Inventory pages start at offset 0, so when there are any they cover unpack_inbox's first page.
+    inventory_pages = [page for name in names if name in outputs and isinstance(outputs[name].get("files"), list) for page in [outputs[name]["files"]]]
     rows = []
-    for name in names:
-        if name in outputs:
-            rows += outputs[name]["files"]
+    for page in inventory_pages or pages:
+        rows += page
     return rows
 
 
@@ -129,21 +141,25 @@ def batches(plan: dict, count: int) -> list[dict]:
     ]
 
 
-def split_by_number(plan: dict, cut: int) -> list[dict]:
-    """`plan` as the two batches the instructions prescribe for a small folder: the moves and
-    deletes of the files numbered below `cut`, then the rest (a duplicate's keeper and a
-    collision's suffix were decided over the whole plan already)."""
-    first = {"moves": [move for move in plan["moves"] if move["i"] < cut], "deletes": [number for number in plan["deletes"] if number < cut]}
-    second = {"moves": [move for move in plan["moves"] if move["i"] >= cut], "deletes": [number for number in plan["deletes"] if number >= cut]}
-    for batch in (first, second):
+def split_by_number(plan: dict, cuts: list[int]) -> list[dict]:
+    """`plan` as the batches the instructions prescribe: the moves and deletes of the files numbered
+    below the first cut, then from each cut to the next, then from the last cut up (a duplicate's
+    keeper and a collision's suffix were decided over the whole plan already)."""
+    edges = [0, *cuts, None]
+    out = []
+    for low, high in pairwise(edges):
+        numbers = [move["i"] for move in plan["moves"]] + list(plan["deletes"])
+        chosen = {number for number in numbers if number >= low and (high is None or number < high)}
+        batch = {"moves": [move for move in plan["moves"] if move["i"] in chosen], "deletes": [number for number in plan["deletes"] if number in chosen]}
         if len(batch["moves"]) > MOVES_PER_CALL or len(batch["deletes"]) > DELETES_PER_CALL:
             raise ValueError("a batch by number holds more than one apply_plan call takes")
-    return [first, second]
+        out.append(batch)
+    return out
 
 
-def harness_plan(outputs: dict, names: list[str], variant: str = "gold", count: int = 1, by_number: int | None = None) -> list[dict]:
+def harness_plan(outputs: dict, names: list[str], variant: str = "gold", count: int = 1, by_number: list[int] | None = None) -> list[dict]:
     """What a case's python step calls: the plan from the saved inventory pages, as `count` batches
-    of at most 80 items, or, with `by_number`, as two batches split at that file number."""
+    of at most 80 items, or, with `by_number`, as batches split at those file numbers."""
     plugin_dir, _case = harness_paths()
     plan = plan_with(rows_from(outputs, names), load_rules(plugin_dir), variant)
     return split_by_number(plan, by_number) if by_number is not None else batches(plan, count)

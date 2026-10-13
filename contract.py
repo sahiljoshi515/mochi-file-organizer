@@ -34,7 +34,7 @@ SHA256 = "The file's SHA-256 hex digest"
 @dataclass
 class OrganizeInput(Output):
     seed: Annotated[int, "Which messy folder to make: the same seed and size always give the same files"]
-    size: Annotated[Size, "How many files: small 60, medium 150, large 300"]
+    size: Annotated[Size, "How many files: small 45, medium 150, large 300"]
 
 
 @dataclass
@@ -53,16 +53,6 @@ class PinOutput(Output):
     duplicates: Annotated[int, "How many extra copies the rules delete"]
     removed: Annotated[int, "How many junk and empty files the rules delete"]
     expected: Annotated[list[ExpectedFile], "Every kept file's hash and final path, sorted by path"]
-
-
-@dataclass
-class UnpackOutput(Output):
-    root: Annotated[str, ROOT]
-    files: Annotated[int, "How many files inbox/ holds now"]
-    dirs: Annotated[int, "How many folders inbox/ holds now"]
-    complete: Annotated[bool, "True when the folder already existed and had been worked on, so it was left as it is; false when it was just made or is still untouched"]
-    note: Annotated[str, "What was done, in a sentence"]
-    rules: Annotated[str, "The organizing rules, Markdown (what read_rules returns)"]
 
 
 @dataclass
@@ -103,6 +93,17 @@ class InventoryOutput(Output):
     total: Annotated[int, "How many files the folder holds in all"]
     next: Annotated[int | None, "The offset of the next page, or null when this was the last"]
     files: list[InventoryFile]
+
+
+@dataclass
+class UnpackOutput(Output):
+    root: Annotated[str, ROOT]
+    files: Annotated[int, "How many files inbox/ holds now"]
+    dirs: Annotated[int, "How many folders inbox/ holds now"]
+    complete: Annotated[bool, "True when the folder already existed and had been worked on, so it was left as it is; false when it was just made or is still untouched"]
+    note: Annotated[str, "What was done, in a sentence"]
+    rules: Annotated[str, "The organizing rules, Markdown (what read_rules returns)"]
+    inventory: Annotated[InventoryOutput, "The first page of the folder's inventory, at most 100 rows, as inventory returns it; call inventory with its next offset for more"]
 
 
 @dataclass

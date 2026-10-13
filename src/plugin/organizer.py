@@ -144,10 +144,14 @@ def rules_text() -> str:
     return RULES_PATH.read_text(encoding="utf-8")
 
 
+def first_page(workspace: Path, name: str) -> InventoryOutput:
+    return inventory(InventoryInput(root=name, offset=0, limit=PAGE_LIMIT), workspace)
+
+
 def unpack_inbox(given: OrganizeInput, workspace: Path) -> UnpackOutput:
-    """The messy folder, made once, with the rules: an existing untouched folder gives the same
-    answer again, and one already worked on is left exactly as it is (complete: true), never made
-    over."""
+    """The messy folder, made once, with the rules and the first inventory page: an existing
+    untouched folder gives the same answer again, and one already worked on is left exactly as it
+    is (complete: true), never made over."""
     name = rules.root_name(given.seed, given.size.value)
     root = confine(workspace, name)
     text = rules_text()
@@ -159,16 +163,17 @@ def unpack_inbox(given: OrganizeInput, workspace: Path) -> UnpackOutput:
         pristine = {(spec.path, hashlib.sha256(spec.data).hexdigest()) for spec in generate.build(given.seed, given.size.value)[0]}
         found = {(path.relative_to(root).as_posix(), rules.sha256_of(path)) for path in present}
         if found == pristine:
-            return UnpackOutput(root=name, files=len(in_inbox), dirs=dirs, complete=False, note=untouched_note(len(in_inbox), dirs), rules=text)
+            note = untouched_note(len(in_inbox), dirs)
+            return UnpackOutput(root=name, files=len(in_inbox), dirs=dirs, complete=False, note=note, rules=text, inventory=first_page(workspace, name))
         elsewhere = len(present) - len(in_inbox)
         note = (
             f"already unpacked and worked on: {len(in_inbox)} files still under {rules.INBOX}/ and {elsewhere} elsewhere in the"
-            " folder; nothing was changed, carry on with inventory"
+            " folder; nothing was changed, carry on from this inventory"
         )
-        return UnpackOutput(root=name, files=len(in_inbox), dirs=dirs, complete=True, note=note, rules=text)
+        return UnpackOutput(root=name, files=len(in_inbox), dirs=dirs, complete=True, note=note, rules=text, inventory=first_page(workspace, name))
     name, root, files, dirs = make_root(workspace, given)
     (root / rules.ORGANIZED).mkdir(exist_ok=True)
-    return UnpackOutput(root=name, files=files, dirs=dirs, complete=False, note=untouched_note(files, dirs), rules=text)
+    return UnpackOutput(root=name, files=files, dirs=dirs, complete=False, note=untouched_note(files, dirs), rules=text, inventory=first_page(workspace, name))
 
 
 def pin_inventory(given: OrganizeInput, workspace: Path) -> PinOutput:

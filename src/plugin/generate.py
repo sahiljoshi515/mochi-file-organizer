@@ -61,8 +61,8 @@ DIR_NAMES = [
     "misc", "tmp", "Camera Uploads", "Archive", "2018", "Scans", "Notes", "src", "backup (1)", "Untitled Folder",
     "New folder", "code", "Family", "Taxes", "Receipts", "to sort", "Inbox old", "Школа",
 ]
-# A small folder stays shallow with short folder names, so its whole plan fits one apply_plan
-# call within a hosted reply (2048 tokens); medium and large use the full pool and depth 4.
+# A small folder stays shallow with short folder names, so each apply_plan call stays short
+# within a hosted reply (2048 tokens); medium and large use the full pool and depth 4.
 SHORT_DIR_NAMES = ["Photos", "Docs", "Work", "old", "tmp", "misc", "2019", "Scans", "Notes", "src", "Taxes", "New folder", "Camera", "backup"]
 DIR_LIMITS = {"small": (8, 10, 2), "medium": (10, 18, 4), "large": (12, 25, 4)}  # least, most, deepest
 WORDS = [
@@ -485,7 +485,7 @@ def build(seed: int, size: str) -> tuple[list[Spec], list[str]]:
         maker.near_pair()
     targets = rng.sample(base, k=n_collide)
     for index, made in enumerate(targets):
-        maker.collision(made, tie=index == 0)
+        maker.collision(made, tie=index == 0 and len(targets) > 1)
     originals = [made for made in base if made not in targets]
     rng.shuffle(originals)
     remaining, group = n_dup, 0

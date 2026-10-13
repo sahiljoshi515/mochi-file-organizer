@@ -5,7 +5,7 @@ import { h, icon } from "./kit/components.js";
 
 /** The three sizes of messy folder, as the task offers them. */
 export const SIZES = [
-  { value: "small", label: "Small", files: 60 },
+  { value: "small", label: "Small", files: 45 },
   { value: "medium", label: "Medium", files: 150 },
   { value: "large", label: "Large", files: 300 },
 ];
@@ -36,6 +36,10 @@ export function progressFrom(tools) {
       state.files = data.files ?? null;
       state.dirs = data.dirs ?? null;
       if (data.rules) state.rules = true;
+      if (data.inventory) {
+        state.total = data.inventory.total ?? state.total;
+        state.listed = Math.min(state.total ?? Infinity, state.listed + (data.inventory.files?.length ?? 0));
+      }
     } else if (tool.name === "read_rules") state.rules = true;
     else if (tool.name === "inventory") {
       state.total = data.total ?? state.total;

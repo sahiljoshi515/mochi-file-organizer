@@ -51,7 +51,7 @@ export default async function page({ plugin }) {
 
   function noteFor() {
     const chosen = sizeOf(size?.value?.() ?? SIZES[0].value);
-    const budget = chosen.value === "small" ? " Designed to take 4 tool calls and the answer, inside the 6 agent steps Mochi's hosted runner allows." : " Medium and large need a runner with a higher step limit, such as your own computer.";
+    const budget = chosen.value === "small" ? " Designed to take 4 tool calls and the answer, inside the 6 agent steps Mochi's hosted runner allows: one to make and list the folder, three to tidy 15 files each." : " Medium and large need a runner with a higher step limit, such as your own computer.";
     return `Makes ${chosen.files} files, with duplicates, junk and misnamed files, in ${rootFor(seed?.value?.() ?? 1, chosen.value)}. Takes a few minutes.${budget}`;
   }
   function refreshNote() {
@@ -104,7 +104,7 @@ export default async function page({ plugin }) {
     }
     if (tool.name === "unpack_inbox") {
       controller.step("make", { state: "done", detail: `${plural(state.files ?? 0, "file")} in ${plural(state.dirs ?? 0, "folder")}` });
-      controller.step("inspect", { progress: "indeterminate" });
+      controller.step("inspect", { detail: state.total ? `${state.listed} of ${state.total} files listed with the rules` : "Read the rules", progress: state.total ? state.listed / state.total : "indeterminate" });
     } else if (tool.name === "read_rules") {
       controller.step("inspect", { detail: "Read the rules", progress: "indeterminate" });
     } else if (tool.name === "inventory") {

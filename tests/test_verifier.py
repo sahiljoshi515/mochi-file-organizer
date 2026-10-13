@@ -86,14 +86,17 @@ def test_approves_the_folder_tidied_by_the_rules(workspace: Path, reference: dic
     assert all(verdict["details"][key] == [] for key in ("missing", "misplaced", "duplicates_kept", "extra", "leftovers", "bad_names"))
 
 
-def test_approves_the_plan_applied_in_two_batches_by_number(workspace: Path, reference: dict) -> None:
-    """The hosted path: files numbered 0 to 29 first, then the rest; names were decided over all files."""
+def test_approves_the_plan_applied_in_three_batches_by_number(workspace: Path, reference: dict) -> None:
+    """The hosted path: the files numbered 0-14, then 15-29, then 30-44, from the page unpack_inbox
+    returns; names were decided over all files."""
     plan = planned(workspace)
-    ids = numbers(workspace)
-    halves = [lambda number: number < 30, lambda number: number >= 30]
-    for half in halves:
-        moves = [Move(i=ids[src], dst=dst) for src, dst in plan.moves if half(ids[src])]
-        deletes = [ids[path] for path in plan.deletes if half(ids[path])]
+    page = unpack_inbox(build_output(ARGUMENTS, OrganizeInput), workspace).inventory
+    ids = {file.path: file.i for file in page.files}
+    assert page.total == 45 and page.next is None and len(ids) == 45
+    for low, high in ((0, 15), (15, 30), (30, 45)):
+        moves = [Move(i=ids[src], dst=dst) for src, dst in plan.moves if low <= ids[src] < high]
+        deletes = [ids[path] for path in plan.deletes if low <= ids[path] < high]
+        assert moves or deletes
         outcome = apply_plan(PlanInput(root=ROOT, moves=moves, deletes=deletes), workspace)
         assert not outcome.errors, outcome.errors
     verdict = verify_task(reference, workspace)
@@ -103,7 +106,7 @@ def test_approves_the_plan_applied_in_two_batches_by_number(workspace: Path, ref
 def test_refuses_an_untouched_folder_with_score_zero(workspace: Path, reference: dict) -> None:
     verdict = verify_task(reference, workspace)
     assert verdict["valid"] is False and verdict["score"] == 0.0
-    assert len(verdict["details"]["missing"]) == reference["unique"] and len(verdict["details"]["leftovers"]) == 60
+    assert len(verdict["details"]["missing"]) == reference["unique"] and len(verdict["details"]["leftovers"]) == 45
     assert "missing" in verdict["message"] and "left outside" in verdict["message"]
 
 
@@ -303,12 +306,19 @@ def test_checks_the_tools_outputs(workspace: Path, tmp_path: Path, reference: di
     assert verify_output("pin_inventory", {"seed": 2, "size": "small"}, reference, scratch)["valid"] is False
 
     rules_md = read_rules(build_output({}, TOOLS[Tool.READ_RULES][0]), workspace).rules
-    unpacked = {"root": ROOT, "files": 60, "dirs": 9, "complete": False, "note": "made", "rules": rules_md}
+    first_page = plain_output(inventory(build_output({"root": ROOT, "offset": 0, "limit": 100}, InventoryInput), workspace))
+    unpacked = {"root": ROOT, "files": 45, "dirs": 9, "complete": False, "note": "made", "rules": rules_md, "inventory": first_page}
     assert verify_output("unpack_inbox", ARGUMENTS, unpacked, workspace)["valid"] is True
     assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "rules": "# nothing"}, workspace)["valid"] is False
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "files": 59}, workspace)["valid"] is False
+    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "files": 44}, workspace)["valid"] is False
     assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "root": "file-organizer/2-small"}, workspace)["valid"] is False
     assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "complete": True}, workspace)["valid"] is True
+    short_page = json.loads(json.dumps(first_page))
+    short_page["files"] = short_page["files"][:-1]
+    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "inventory": short_page}, workspace)["valid"] is False
+    renumbered = json.loads(json.dumps(first_page))
+    renumbered["files"][0]["i"] = 999
+    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "inventory": renumbered}, workspace)["valid"] is False
 
     page_input = {"root": ROOT, "offset": 10, "limit": 20}
     page = plain_output(inventory(build_output(page_input, InventoryInput), workspace))
@@ -336,9 +346,12 @@ def test_checks_the_tools_outputs(workspace: Path, tmp_path: Path, reference: di
     assert verify_output("apply_plan", again, {"moved": 1, "deleted": 1, "removed_dirs": 0, "errors": []}, workspace)["valid"] is False
     errors = ["move 99999 -> organized/x.txt: unknown number: not in the inventory", f"delete {ids[plan.deletes[0]]}: already deleted"]
     assert verify_output("apply_plan", again, {"moved": 0, "deleted": 0, "removed_dirs": 0, "errors": errors}, workspace)["valid"] is True
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "files": 58, "complete": True}, workspace)["valid"] is True
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "files": 58, "complete": False}, workspace)["valid"] is False
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "files": 60, "complete": True}, workspace)["valid"] is False
+    worked_page = plain_output(inventory(build_output({"root": ROOT, "offset": 0, "limit": 100}, InventoryInput), workspace))
+    worked = {**unpacked, "inventory": worked_page}
+    assert verify_output("unpack_inbox", ARGUMENTS, {**worked, "files": 43, "complete": True}, workspace)["valid"] is True
+    assert verify_output("unpack_inbox", ARGUMENTS, {**worked, "files": 43, "complete": False}, workspace)["valid"] is False
+    assert verify_output("unpack_inbox", ARGUMENTS, {**worked, "files": 45, "complete": True}, workspace)["valid"] is False
+    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "files": 43, "complete": True}, workspace)["valid"] is False, "a stale page is refused"
 
     tree_input = {"root": ROOT, "max_entries": 50}
     tree = plain_output(list_tree(build_output(tree_input, TOOLS[Tool.LIST_TREE][0]), workspace))

@@ -33,12 +33,14 @@ def test_the_server_offers_the_contract_and_answers_calls(tmp_path: Path) -> Non
             result = await session.call_tool("unpack_inbox", {"seed": 5, "size": "small"})
             assert not result.isError
             payload = result.structuredContent or json.loads(result.content[0].text)
-            assert payload["root"] == "file-organizer/5-small" and payload["files"] == 60 and "## 1. Delete" in payload["rules"]
+            assert payload["root"] == "file-organizer/5-small" and payload["files"] == 45 and "## 1. Delete" in payload["rules"]
+            assert payload["inventory"]["total"] == 45 and payload["inventory"]["next"] is None and len(payload["inventory"]["files"]) == 45
             page = await session.call_tool("inventory", {"root": "file-organizer/5-small", "offset": 0, "limit": 100})
             assert not page.isError
             rows = (page.structuredContent or json.loads(page.content[0].text))["files"]
-            assert len(rows) == 60 and all(len(row["sha256"]) == 64 for row in rows)
-            assert [row["i"] for row in rows] == list(range(60))
+            assert rows == payload["inventory"]["files"]
+            assert len(rows) == 45 and all(len(row["sha256"]) == 64 for row in rows)
+            assert [row["i"] for row in rows] == list(range(45))
             failure = await session.call_tool("inventory", {"root": "file-organizer/9-small", "offset": 0, "limit": 100})
             assert failure.isError and "unpack_inbox" in failure.content[0].text
             rules = await session.call_tool("read_rules", {})

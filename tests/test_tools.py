@@ -44,8 +44,10 @@ def numbers(workspace: Path) -> dict[str, int]:
 
 def test_unpack_makes_the_folder_once_and_never_destroys_progress(tmp_path: Path) -> None:
     made = unpack_inbox(SMALL, tmp_path)
-    assert made.root == ROOT and made.files == 60 and 8 <= made.dirs <= 25 and made.complete is False
+    assert made.root == ROOT and made.files == 45 and 8 <= made.dirs <= 25 and made.complete is False
     assert made.rules == read_rules(RulesInput(), tmp_path).rules
+    assert made.inventory == inventory(InventoryInput(root=ROOT, offset=0, limit=100), tmp_path), "the first inventory page comes with the folder"
+    assert made.inventory.total == 45 and made.inventory.next is None and [file.i for file in made.inventory.files] == list(range(45))
     assert (tmp_path / ROOT / "inbox").is_dir() and (tmp_path / ROOT / "organized").is_dir()
     before = [(row.path, row.sha256, row.mtime_utc) for row in rows(tmp_path)]
     assert unpack_inbox(SMALL, tmp_path) == made, "an untouched folder gives the same answer again"
@@ -56,14 +58,16 @@ def test_unpack_makes_the_folder_once_and_never_destroys_progress(tmp_path: Path
     apply_plan(PlanInput(root=ROOT, moves=[Move(i=ids[src], dst=dst)], deletes=[ids[planned.deletes[0]]]), tmp_path)
     after = [(row.path, row.sha256, row.mtime_utc) for row in rows(tmp_path)]
     again = unpack_inbox(SMALL, tmp_path)
-    assert again.complete is True and again.files == 58 and "nothing was changed" in again.note
+    assert again.complete is True and again.files == 43 and "nothing was changed" in again.note
+    assert again.inventory.total == 44, "the page lists the moved file under organized/ too"
+    assert {file.i for file in again.inventory.files} == set(range(45)) - {ids[planned.deletes[0]]}
     assert [(row.path, row.sha256, row.mtime_utc) for row in rows(tmp_path)] == after, "a worked-on folder is left as it is"
     for path in (tmp_path / ROOT).rglob("*"):
         if path.is_file():
             path.unlink()
     fresh = unpack_inbox(SMALL, tmp_path)
     assert fresh == made and [(row.path, row.sha256, row.mtime_utc) for row in rows(tmp_path)] == before, "a folder without files is made again"
-    assert list(numbers(tmp_path).values()) == list(range(60)), "the numbers start over with the folder"
+    assert list(numbers(tmp_path).values()) == list(range(45)), "the numbers start over with the folder"
     with pytest.raises(ValueError, match="never made over"):
         pin_inventory(SMALL, tmp_path)
 
@@ -75,20 +79,20 @@ def test_read_rules_returns_the_document(tmp_path: Path) -> None:
 
 
 def test_inventory_pages_in_path_order_and_numbers_files(workspace: Path) -> None:
-    first = inventory(InventoryInput(root=ROOT, offset=0, limit=50), workspace)
-    second = inventory(InventoryInput(root=ROOT, offset=50, limit=50), workspace)
-    assert (first.total, first.next, len(first.files)) == (60, 50, 50)
-    assert (second.total, second.next, len(second.files)) == (60, None, 10)
+    first = inventory(InventoryInput(root=ROOT, offset=0, limit=30), workspace)
+    second = inventory(InventoryInput(root=ROOT, offset=30, limit=30), workspace)
+    assert (first.total, first.next, len(first.files)) == (45, 30, 30)
+    assert (second.total, second.next, len(second.files)) == (45, None, 15)
     listed = first.files + second.files
     assert [as_row(file) for file in listed] == rows(workspace)
     assert [file.path for file in listed] == sorted(file.path for file in listed)
-    assert [file.i for file in listed] == list(range(60)), "a fresh folder is numbered in path order"
+    assert [file.i for file in listed] == list(range(45)), "a fresh folder is numbered in path order"
     assert json.loads((workspace / LEDGER).read_text())["files"]["0"] == listed[0].path
     assert inventory(InventoryInput(root=ROOT, offset=500, limit=10), workspace).files == []
     with pytest.raises(ValueError, match="limit"):
         inventory(InventoryInput(root=ROOT, offset=0, limit=101), workspace)
     whole = inventory(InventoryInput(root=ROOT, offset=0, limit=100), workspace)
-    assert len(whole.files) == 60 and whole.next is None
+    assert len(whole.files) == 45 and whole.next is None
     with pytest.raises(FileNotFoundError, match="unpack_inbox"):
         inventory(InventoryInput(root="file-organizer/2-small", offset=0, limit=10), workspace)
     with pytest.raises(ValueError, match="root must be"):
@@ -197,10 +201,10 @@ def test_apply_plan_refuses_symlinks(workspace: Path) -> None:
 
 def test_list_tree_is_sorted_and_bounded(workspace: Path) -> None:
     tree = list_tree(TreeInput(root=ROOT, max_entries=200), workspace)
-    assert tree.files == 60 and tree.entries == sorted(tree.entries) and not tree.truncated
+    assert tree.files == 45 and tree.entries == sorted(tree.entries) and not tree.truncated
     assert "inbox/" in tree.entries and "organized/" in tree.entries
     short = list_tree(TreeInput(root=ROOT, max_entries=5), workspace)
-    assert len(short.entries) == 5 and short.truncated and short.files == 60
+    assert len(short.entries) == 5 and short.truncated and short.files == 45
     with pytest.raises(ValueError, match="max_entries"):
         list_tree(TreeInput(root=ROOT, max_entries=201), workspace)
 
@@ -209,7 +213,7 @@ def test_pin_inventory_is_the_rules_applied_to_the_folder(tmp_path: Path) -> Non
     pinned = pin_inventory(SMALL, tmp_path)
     planned = rules.plan(rows(tmp_path))
     assert [(row.sha256, row.path) for row in pinned.expected] == list(planned.expected)
-    assert (pinned.unique, pinned.duplicates, pinned.removed, pinned.files) == (planned.unique, planned.duplicates, planned.removed, 60)
+    assert (pinned.unique, pinned.duplicates, pinned.removed, pinned.files) == (planned.unique, planned.duplicates, planned.removed, 45)
     assert pinned.root == ROOT and pinned.size is Size.SMALL
 
 

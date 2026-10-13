@@ -6,6 +6,6 @@ highlights:
   - "Duplicates are found by content, never by name or size"
   - "Every file's final path is checked hash by hash"
 steps:
-  - "Pick a seed and a size: small is designed to take 4 tool calls and the answer, inside the 6 agent steps Mochi's hosted runner allows; medium and large need a runner with a higher step limit, such as your own computer"
+  - "Pick a seed and a size: small (45 files) is designed to take 4 tool calls and the answer, inside the 6 agent steps Mochi's hosted runner allows; medium and large need a runner with a higher step limit, such as your own computer"
   - "The agent reads the rules, inspects every file and tidies the folder"
   - "See every file where it belongs, and what went wrong if anything did"
