@@ -1,0 +1,11 @@
+_ > nanoagent.plugin.manifest.ProductConfig:
+tagline: "Tidy a messy folder: drop exact duplicates, then file and rename everything by the rules"
+summary: "Pick a seed and a size and it makes a messy folder of photos, documents, code and junk, with duplicates hiding under other names. The agent must delete every duplicate, junk and empty file and move everything else to organized/<category>/<year>/<date>_<slug>.<ext> by precise rules, and every file is then checked against the answer key."
+highlights:
+  - "Real file formats with embedded dates: EXIF, PNG, PDF and Markdown front matter"
+  - "Duplicates are found by content, never by name or size"
+  - "Every file's final path is checked hash by hash"
+steps:
+  - "Pick a seed and a size: small is designed to take 4 tool calls and the answer, inside the 6 agent steps Mochi's hosted runner allows; medium and large need a runner with a higher step limit, such as your own computer"
+  - "The agent reads the rules, inspects every file and tidies the folder"
+  - "See every file where it belongs, and what went wrong if anything did"

@@ -1,0 +1,45 @@
+_ > nanoagent.plugin.manifest.ManifestConfig:
+id: file-organizer
+name: File Organizer
+version: 0.1.0
+status: ready
+
+runtime > nanoagent.plugin.manifest.RuntimeConfig:
+  type: mcp_stdio
+  command: [uv, run, --frozen, python, -m, plugin]
+
+permissions > nanoagent.plugin.manifest.PermissionsConfig:
+  network > nanoagent.plugin.manifest.NetworkConfig:
+    hosts: []
+  filesystem > nanoagent.plugin.manifest.FilesystemConfig:
+    write: [workspace]
+
+# One entry per contract.Tool; its input and output classes are contract.TOOLS's.
+tools > dict[contract.Tool, nanoagent.plugin.manifest.ToolConfig]:
+  pin_inventory:
+    description: Make the messy folder in a scratch workspace, apply the rules, and pin every kept file's hash and final path
+  unpack_inbox:
+    description: Make the messy folder for a seed and size at file-organizer/<seed>-<size>/inbox and return the rules; a folder made earlier is left as it is
+  read_rules:
+    description: The organizing rules, which say what to delete and where every other file goes
+  inventory:
+    description: One page of at most 100 of the folder's files, sorted by path, each with its number i, hash, sniffed type, claimed extension, raw embedded dates and mtime; paths are relative to root
+  apply_plan:
+    description: Move files by their inventory number i to a path under organized/ (relative to root, never overwriting) and delete files by number, at most 80 of each per call; each failure, an unknown or spent number included, is reported and the rest still applied
+  list_tree:
+    description: The folder's files and sub-folders, sorted, relative to root
+
+# One entry per contract.Task; its input class is contract.TASKS's.
+tasks > dict[contract.Task, nanoagent.plugin.manifest.TaskConfig]:
+  organize:
+    description: Tidy a messy folder by the rules, deleting exact duplicates and junk and filing every other file under organized/<category>/<YYYY>/<YYYY-MM-DD>_<slug>.<ext>
+    runner: agent
+    tools: [unpack_inbox, read_rules, inventory, apply_plan, list_tree]
+    reference: pin_inventory
+    instructions: |-
+      Mochi's hosted runner allows 6 agent steps per run and a short reply each; a small folder is designed to take 4 tool calls (unpack_inbox, inventory, apply_plan, apply_plan) in the 6 available, then your answer.
+      1. Call unpack_inbox once with the task's seed and size. It returns root (every other path is relative to it) and the rules; follow them to the letter (read_rules returns the same text if you need it again).
+      2. Call inventory with limit 100 and offset 0; a small folder is one page, otherwise go on with offset 100, 200, ... until next is null.
+      3. Decide from the inventory alone, never from a file's name or claimed extension: delete junk, empty files and every extra copy of a duplicate (same sha256; keep the earliest mtime_utc, on a tie the smallest path); for each kept file take category and ext from type, the date by the precedence in the rules (embedded value, then the file name, then mtime_utc), the slug from its own name, and a -2, -3, ... suffix when a name is already taken. Decide every file from the whole inventory: a duplicate's keeper and a collision's suffixes follow the rules over all files, whatever batch they are applied in.
+      4. Decide and apply the plan with apply_plan in two batches: first the moves and deletes of the inventory rows with i 0 to 29, then the rest; each call then needs the thinking for about 30 files only. Move by the file's i, as {i, dst} with dst the final path under organized/, and delete by i; a delete may be sent in either batch. A call takes at most 80 moves and 80 deletes; a larger folder takes more batches of about 30 files, by i ranges in order. A file keeps its i when it moves. Fix anything a call reports. When done, inbox/ holds no files and organized/ holds nothing but the kept files at their final paths.
+      Finish with one sentence saying how many files you moved and deleted.
