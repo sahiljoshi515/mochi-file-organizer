@@ -27,7 +27,7 @@
    "save_as": "last"
   },
   {
-   "python": "(workspace / '.file-organizer' / 'state.json').write_text('{}')\n"
+   "python": "path = workspace / '.file-organizer' / 'state.json'\nstate = json.loads(path.read_text())\nstate['applied'], state['rows'] = [], []\npath.write_text(json.dumps(state))\n"
   },
   {
    "tool": "submit",

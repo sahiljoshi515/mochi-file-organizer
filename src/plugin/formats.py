@@ -1,9 +1,11 @@
-"""Readers for the file structures the rules look inside, written by hand with bounds checks: a zip's
-central directory and entries, TIFF/EXIF, JPEG segments, PNG and RIFF chunks, ISO media boxes (HEIF
-items, Canon CR3 metadata), a PDF's document information and Markdown front matter.
+"""Readers for the file structures the rules look inside, written by hand with bounds checks: zip entries
+looked up by name, TIFF/EXIF, JPEG markers, PNG and RIFF chunks, ISO media boxes (HEIF items, Canon CR3
+metadata), a PDF's document information and Markdown front matter.
 
 Shared, byte for byte, by src/plugin/ and verifier/. Nothing here raises on a malformed file: a
-structure that does not read gives None (or nothing), and the rules then fall back.
+structure that does not read gives None (or nothing), and the rules then fall back. Every walk stops at
+a fixed count (RULES.md §3, "Reading limits"), so a file's cost is bounded whatever it holds: the
+verifier re-derives every file's facts twice within its time limit.
 """
 
 from __future__ import annotations
@@ -13,17 +15,40 @@ from dataclasses import dataclass
 
 from .inflate import inflate
 
-ENTRY_LIMIT = 1 << 20  # the most a zip entry the rules read may hold, packed or unpacked
-MAX_ENTRIES = 65535
+PART_BYTES = 4096  # a zip part is read as far as its first 4,096 bytes of content
+PART_BLOCKS = 4  # and its first 4 DEFLATE blocks
+EOCD_SEARCH = 22 + 65535
+EOCD_TRIES = 16
+JPEG_MARKERS = 64
+CHUNKS = 1024
+BOXES = 1024
 MAX_IFD_ENTRIES = 1024
+ILOC_ITEMS = 1024
+ILOC_EXTENTS = 1024
+ITEM_BYTES = 1 << 20  # a HEIF Exif item is read as far as its first 1 MiB
+FRONT_LINES = 1000
 TIFF_HEADERS = (b"II*\x00", b"MM\x00*")
 EXIF_HEADER = b"Exif\x00\x00"
-EOCD_SEARCH = 22 + 65535
 CANON_UUID = bytes.fromhex("85c0b687820f11e08111f4ce462b6a48")
-PDF_CREATION = re.compile(rb"/CreationDate\s*\(")
-PDF_INFO = re.compile(rb"/Info\s+([0-9]+)\s+([0-9]+)\s+R")
 PDF_LITERAL = 64
-FRONT_LINES = 1000
+PDF_CREATION = re.compile(rb"/CreationDate\s*\(")
+# Searched in the reversed file, so the first match is the file's last one.
+PDF_INFO_REVERSED = re.compile(rb"R\s+([0-9]+)\s+([0-9]+)\s+ofnI/")
+PDF_CREATION_REVERSED = re.compile(rb"\(\s*etaDnoitaerC/")
+HEADER = 46  # a central-directory header's fixed part, before the entry's name
+# The names the rules look up in a zip. Each is searched for as the name, with a lookbehind for its
+# header (PK 1 2, then 42 bytes whose name-length field, at 28, holds the name's length): a search for
+# the name itself is fast however many headers or names a crafted directory holds.
+ZIP_NAMES = ("word/document.xml", "xl/workbook.xml", "xl/workbook.bin", "ppt/presentation.xml", "[Content_Types].xml", "docProps/core.xml", "mimetype", "meta.xml")
+
+
+def header_pattern(name: str) -> re.Pattern:
+    raw = re.escape(name.encode())
+    length = re.escape(len(name.encode()).to_bytes(2, "little"))
+    return re.compile(raw + rb"(?<=PK\x01\x02[\x00-\xff]{24}" + length + rb"[\x00-\xff]{16}" + raw + rb")")
+
+
+ZIP_HEADERS = {name: header_pattern(name) for name in ZIP_NAMES}
 
 
 def number(data: bytes, start: int, width: int, big: bool) -> int | None:
@@ -42,16 +67,18 @@ class ZipEntry:
     flags: int
     method: int
     packed: int
-    size: int
     offset: int
 
 
 def end_record(data: bytes) -> int | None:
     """Where the zip's end-of-central-directory record starts: the last `PK\\5\\6` in the final 65,557
-    bytes whose comment length reaches exactly the end of the file; None when there is none."""
+    bytes whose comment length reaches exactly the end of the file, trying at most the last 16; None
+    when there is none."""
     start = max(0, len(data) - EOCD_SEARCH)
     end = data.rfind(b"PK\x05\x06", start)
-    while end >= 0:
+    for _try in range(EOCD_TRIES):
+        if end < 0:
+            return None
         comment = number(data, end + 20, 2, False)
         if comment is not None and end + 22 + comment == len(data):
             return end
@@ -59,32 +86,38 @@ def end_record(data: bytes) -> int | None:
     return None
 
 
-def zip_entries(data: bytes) -> list[ZipEntry]:
-    """The entries of a zip's central directory, in order; [] when there is no readable one (or ZIP64)."""
+LAST_DIRECTORY: list = [None, None]  # (the data, its central directory's span): a file is looked up several times
+
+
+def zip_directory(data: bytes) -> tuple[int, int] | None:
+    """The central directory's span: from the offset the end record gives (counted from the start of the
+    file) to the end record; None without an end record, or for ZIP64."""
+    if LAST_DIRECTORY[0] is data:
+        return LAST_DIRECTORY[1]
     end = end_record(data)
-    if end is None:
-        return []
-    count = number(data, end + 10, 2, False)
-    offset = number(data, end + 16, 4, False)
-    if count is None or offset is None or offset == 0xFFFFFFFF:
-        return []
-    entries: list[ZipEntry] = []
-    for _index in range(min(count, MAX_ENTRIES)):
-        if data[offset : offset + 4] != b"PK\x01\x02":
-            break
-        fields = [number(data, offset + at, width, False) for at, width in ((8, 2), (10, 2), (20, 4), (24, 4), (28, 2), (30, 2), (32, 2), (42, 4))]
-        if None in fields:
-            break
-        flags, method, packed, size, name_length, extra_length, comment_length, local = fields
-        name = data[offset + 46 : offset + 46 + name_length].decode("utf-8", "replace")
-        entries.append(ZipEntry(name=name, flags=flags, method=method, packed=packed, size=size, offset=local))
-        offset += 46 + name_length + extra_length + comment_length
-    return entries
+    offset = None if end is None else number(data, end + 16, 4, False)
+    span = None if end is None or offset is None or offset == 0xFFFFFFFF or offset > end else (offset, end)
+    LAST_DIRECTORY[0], LAST_DIRECTORY[1] = data, span
+    return span
+
+
+def zip_entry(data: bytes, name: str) -> ZipEntry | None:
+    """The entry named `name`: the first central-directory header in the directory's span that is
+    followed by that name and gives its length, or None."""
+    span = zip_directory(data)
+    if span is None:
+        return None
+    found = (ZIP_HEADERS.get(name) or header_pattern(name)).search(data, span[0] + HEADER, span[1])
+    if found is None:
+        return None
+    at = found.start() - HEADER
+    return ZipEntry(name=name, flags=number(data, at + 8, 2, False), method=number(data, at + 10, 2, False), packed=number(data, at + 20, 4, False), offset=number(data, at + 42, 4, False))
 
 
 def zip_read(data: bytes, entry: ZipEntry) -> bytes | None:
-    """An entry's content when it is stored or deflated, unencrypted and at most ENTRY_LIMIT bytes; else None."""
-    if entry.flags & 1 or entry.method not in (0, 8) or entry.packed > ENTRY_LIMIT or entry.size > ENTRY_LIMIT:
+    """The first PART_BYTES bytes of an entry's content when it is stored or deflated and unencrypted,
+    its local header is at its offset and its data lies in the file; else None."""
+    if entry.flags & 1 or entry.method not in (0, 8):
         return None
     if data[entry.offset : entry.offset + 4] != b"PK\x03\x04":
         return None
@@ -93,45 +126,45 @@ def zip_read(data: bytes, entry: ZipEntry) -> bytes | None:
     if name_length is None or extra_length is None:
         return None
     start = entry.offset + 30 + name_length + extra_length
-    packed = data[start : start + entry.packed]
-    if len(packed) != entry.packed:
+    if start + entry.packed > len(data):
         return None
-    return packed if entry.method == 0 else inflate(packed, ENTRY_LIMIT)
+    if entry.method == 0:
+        return data[start : start + min(entry.packed, PART_BYTES)]
+    return inflate(data, PART_BYTES, PART_BLOCKS, start, start + entry.packed)
 
 
 def zip_member(data: bytes, name: str) -> bytes | None:
-    """The content of the first entry named `name`, as zip_read gives it, or None."""
-    for entry in zip_entries(data):
-        if entry.name == name:
-            return zip_read(data, entry)
-    return None
+    """The start of the content of the entry named `name`, as zip_read gives it, or None."""
+    entry = zip_entry(data, name)
+    return None if entry is None else zip_read(data, entry)
 
 
 # ----- TIFF and EXIF -----
 
 
-def ifd_entries(tiff: bytes, ifd: int, big: bool) -> list[tuple[int, int, int, int]]:
-    """An IFD's (tag, type, count, value position) entries; [] when the IFD does not read."""
+def ifd_find(tiff: bytes, ifd: int, big: bool, tag: int, kind: int | None) -> tuple[int, int] | None:
+    """The first entry of the IFD at `ifd` with `tag` (and type `kind`): (count, value position); None
+    when there is none or the IFD does not read (an offset under 8, over 1,024 entries, past the end)."""
     count = number(tiff, ifd, 2, big)
     if count is None or ifd < 8 or count > MAX_IFD_ENTRIES or ifd + 2 + 12 * count > len(tiff):
-        return []
-    found = []
-    for index in range(count):
-        at = ifd + 2 + 12 * index
-        tag, kind, items = number(tiff, at, 2, big), number(tiff, at + 2, 2, big), number(tiff, at + 4, 4, big)
-        found.append((tag, kind, items, at + 8))
-    return found
+        return None
+    order = "big" if big else "little"
+    for at in range(ifd + 2, ifd + 2 + 12 * count, 12):
+        if int.from_bytes(tiff[at : at + 2], order) == tag and (kind is None or int.from_bytes(tiff[at + 2 : at + 4], order) == kind):
+            return int.from_bytes(tiff[at + 4 : at + 8], order), at + 8
+    return None
 
 
 def ifd_date(tiff: bytes, ifd: int, big: bool) -> str | None:
     """The DateTimeOriginal (tag 9003, ASCII, at most 64 bytes) in the IFD at `ifd`, as stored, or None."""
-    for tag, kind, items, at in ifd_entries(tiff, ifd, big):
-        if tag == 0x9003 and kind == 2:
-            start = at if items <= 4 else number(tiff, at, 4, big)
-            if start is None or items > 64 or start + items > len(tiff):
-                return None
-            return tiff[start : start + items].split(b"\x00", 1)[0].decode("latin-1")
-    return None
+    found = ifd_find(tiff, ifd, big, 0x9003, 2)
+    if found is None:
+        return None
+    items, at = found
+    start = at if items <= 4 else number(tiff, at, 4, big)
+    if start is None or items > 64 or start + items > len(tiff):
+        return None
+    return tiff[start : start + items].split(b"\x00", 1)[0].decode("latin-1")
 
 
 def first_ifd(tiff: bytes) -> tuple[int, bool] | None:
@@ -149,11 +182,11 @@ def tiff_date_original(tiff: bytes) -> str | None:
     if found is None:
         return None
     first, big = found
-    for tag, _kind, _items, at in ifd_entries(tiff, first, big):
-        if tag == 0x8769:
-            exif = number(tiff, at, 4, big)
-            return None if exif is None else ifd_date(tiff, exif, big)
-    return None
+    pointer = ifd_find(tiff, first, big, 0x8769, None)
+    if pointer is None:
+        return None
+    exif = number(tiff, pointer[1], 4, big)
+    return None if exif is None else ifd_date(tiff, exif, big)
 
 
 def first_ifd_date(tiff: bytes) -> str | None:
@@ -163,10 +196,11 @@ def first_ifd_date(tiff: bytes) -> str | None:
 
 
 def jpeg_exif(data: bytes) -> bytes | None:
-    """The TIFF inside a JPEG's first APP1 `Exif\\0\\0` segment, or None."""
+    """The TIFF inside a JPEG's first APP1 `Exif\\0\\0` segment, among its first 64 markers (fill bytes
+    count), or None."""
     at = 2
-    while at + 4 <= len(data):
-        if data[at] != 0xFF:
+    for _marker in range(JPEG_MARKERS):
+        if at + 4 > len(data) or data[at] != 0xFF:
             return None
         marker = data[at + 1]
         if marker == 0xFF:
@@ -180,9 +214,8 @@ def jpeg_exif(data: bytes) -> bytes | None:
         length = number(data, at + 2, 2, True)
         if length is None or length < 2 or at + 2 + length > len(data):
             return None
-        segment = data[at + 4 : at + 2 + length]
-        if marker == 0xE1 and segment.startswith(EXIF_HEADER):
-            return segment[len(EXIF_HEADER) :]
+        if marker == 0xE1 and data.startswith(EXIF_HEADER, at + 4, at + 2 + length):
+            return data[at + 4 + len(EXIF_HEADER) : at + 2 + length]
         at += 2 + length
     return None
 
@@ -190,31 +223,32 @@ def jpeg_exif(data: bytes) -> bytes | None:
 # ----- PNG and RIFF chunks -----
 
 
-def png_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
-    """A PNG's (kind, body) chunks up to IEND, stopping where the file stops reading."""
+def png_chunks(data: bytes) -> list[tuple[bytes, int, int]]:
+    """A PNG's first 1,024 chunks up to IEND, as (kind, body start, body end), stopping where the file
+    stops reading."""
     chunks = []
     at = 8
-    while at + 8 <= len(data):
+    for _chunk in range(CHUNKS):
         length = number(data, at, 4, True)
-        kind = data[at + 4 : at + 8]
         if length is None or at + 12 + length > len(data):
             break
-        chunks.append((kind, data[at + 8 : at + 8 + length]))
+        kind = data[at + 4 : at + 8]
+        chunks.append((kind, at + 8, at + 8 + length))
         if kind == b"IEND":
             break
         at += 12 + length
     return chunks
 
 
-def riff_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
-    """A RIFF file's top-level (fourcc, body) chunks after its form type."""
+def riff_chunks(data: bytes) -> list[tuple[bytes, int, int]]:
+    """A RIFF file's first 1,024 top-level chunks after its form type, as (fourcc, body start, body end)."""
     chunks = []
     at = 12
-    while at + 8 <= len(data):
+    for _chunk in range(CHUNKS):
         size = number(data, at + 4, 4, False)
         if size is None or at + 8 + size > len(data):
             break
-        chunks.append((data[at : at + 4], data[at + 8 : at + 8 + size]))
+        chunks.append((data[at : at + 4], at + 8, at + 8 + size))
         at += 8 + size + (size & 1)
     return chunks
 
@@ -223,10 +257,12 @@ def riff_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
 
 
 def boxes(data: bytes, start: int, end: int) -> list[tuple[bytes, int, int]]:
-    """The (type, body start, body end) boxes between `start` and `end`."""
+    """The first 1,024 (type, body start, body end) boxes between `start` and `end`."""
     found = []
     at = start
-    while at + 8 <= end:
+    for _box in range(BOXES):
+        if at + 8 > end:
+            break
         size = number(data, at, 4, True)
         kind = data[at + 4 : at + 8]
         header = 8
@@ -252,8 +288,10 @@ def need(value: int | None) -> int:
     return value
 
 
-def item_locations(data: bytes, start: int, end: int) -> dict[int, tuple[int, int, list[tuple[int, int]]]]:
-    """An `iloc` box's items: id -> (construction method, base offset, [(extent offset, extent length)])."""
+def item_location(data: bytes, start: int, end: int, wanted: int) -> tuple[int, int, list[tuple[int, int]]] | None:
+    """Where an `iloc` box puts item `wanted`: (construction method, base offset, [(extent offset, extent
+    length)]), reading its items in order, at most 1,024 items and 1,024 extents in all; None when it is
+    not among them."""
     version = data[start]
     offset_size, length_size = data[start + 4] >> 4, data[start + 4] & 15
     base_size, index_size = data[start + 5] >> 4, (data[start + 5] & 15 if version in (1, 2) else 0)
@@ -261,8 +299,8 @@ def item_locations(data: bytes, start: int, end: int) -> dict[int, tuple[int, in
     at = start + 6
     count = need(number(data, at, id_width, True))
     at += id_width
-    items = {}
-    for _index in range(min(count, MAX_IFD_ENTRIES)):
+    budget = ILOC_EXTENTS
+    for _index in range(min(count, ILOC_ITEMS)):
         item = need(number(data, at, id_width, True))
         at += id_width
         method = 0
@@ -274,8 +312,11 @@ def item_locations(data: bytes, start: int, end: int) -> dict[int, tuple[int, in
         at += base_size
         extents = need(number(data, at, 2, True))
         at += 2
+        if extents > budget:
+            return None
+        budget -= extents
         spans = []
-        for _extent in range(min(extents, 64)):
+        for _extent in range(extents):
             at += index_size
             offset = need(number(data, at, offset_size, True)) if offset_size else 0
             at += offset_size
@@ -284,12 +325,13 @@ def item_locations(data: bytes, start: int, end: int) -> dict[int, tuple[int, in
             spans.append((offset, length))
         if at > end:
             raise Unreadable("iloc runs past its box")
-        items[item] = (method, base, spans)
-    return items
+        if item == wanted:
+            return method, base, spans
+    return None
 
 
 def exif_item_ids(data: bytes, start: int, end: int) -> list[int]:
-    """The ids of an `iinf` box's items of type `Exif`, in order."""
+    """The ids of an `iinf` box's items of type `Exif`, in order, among its first 1,024 boxes."""
     version = data[start]
     width = 2 if version == 0 else 4
     ids = []
@@ -310,21 +352,34 @@ def heif_exif(data: bytes) -> bytes | None:
         for kind, start, end in boxes(data, 0, len(data)):
             if kind != b"meta":
                 continue
-            ids, locations, idat = [], {}, None
+            ids, iloc, idat = [], None, None
             for inner, body, body_end in boxes(data, start + 4, end):
-                if inner == b"iinf":
-                    ids = exif_item_ids(data, body, body_end)
-                elif inner == b"iloc":
-                    locations = item_locations(data, body, body_end)
-                elif inner == b"idat":
+                if inner == b"iinf" and not ids:
+                    ids = exif_item_ids(data, body, body_end) or [None]
+                elif inner == b"iloc" and iloc is None:
+                    iloc = (body, body_end)
+                elif inner == b"idat" and idat is None:
                     idat = body
-            if not ids or ids[0] not in locations:
+            if not ids or ids[0] is None or iloc is None:
                 return None
-            method, base, spans = locations[ids[0]]
+            location = item_location(data, iloc[0], iloc[1], ids[0])
+            if location is None:
+                return None
+            method, base, spans = location
             if method not in (0, 1) or (method == 1 and idat is None):
                 return None
             origin = base + (idat if method == 1 else 0)
-            payload = b"".join(data[origin + offset : (origin + offset + length) if length else len(data)] for offset, length in spans)
+            pieces: list[bytes] = []
+            held = 0
+            for offset, length in spans:
+                start = origin + offset
+                stop = start + length if length else len(data)
+                piece = data[start : min(stop, start + ITEM_BYTES - held)]
+                pieces.append(piece)
+                held += len(piece)
+                if held >= ITEM_BYTES:
+                    break
+            payload = b"".join(pieces)
             skip = need(number(payload, 0, 4, True))
             tiff = payload[4 + skip :]
             tiff = tiff.removeprefix(EXIF_HEADER)  # some writers leave the marker in
@@ -371,34 +426,32 @@ def mvhd_seconds(data: bytes) -> int | None:
 # ----- PDF and Markdown -----
 
 
-def literal(data: bytes, found: re.Match) -> str:
-    """A PDF literal's text after `(`: up to the next `)`, at most 64 bytes."""
-    return data[found.end() : found.end() + PDF_LITERAL].split(b")", 1)[0].decode("latin-1")
-
-
-def last_match(pattern: re.Pattern, data: bytes) -> re.Match | None:
-    last = None
-    for found in pattern.finditer(data):
-        last = found
-    return last
+def literal(data: bytes, end: int) -> str:
+    """A PDF literal's text after the `(` that ends at `end`: up to the next `)`, at most 64 bytes."""
+    return data[end : end + PDF_LITERAL].split(b")", 1)[0].decode("latin-1")
 
 
 def pdf_creation(data: bytes) -> str | None:
     """The CreationDate of a PDF's document information dictionary: the object the last `/Info N G R`
     names, when it is written out plainly (the last `N G obj` ... `endobj`), decides; without an `/Info`
     reference, or when that object is not written out plainly, the last `/CreationDate (` literal in
-    the file. None when the deciding place holds no CreationDate literal."""
-    info = last_match(PDF_INFO, data)
+    the file. None when the deciding place holds no CreationDate literal. Each "last" is found by one
+    search of the reversed file."""
+    backwards = data[::-1]
+    size = len(data)
+    info = PDF_INFO_REVERSED.search(backwards)
     if info is not None:
-        header = re.compile(rb"(?<![0-9])" + info.group(1) + rb"\s+" + info.group(2) + rb"\s+obj\b")
-        body = last_match(header, data)
+        # `N G obj`, reversed: the generation's and the number's digits come reversed from the search
+        header = re.compile(rb"\bjbo\s+" + info.group(1) + rb"\s+" + info.group(2) + rb"(?![0-9])")
+        body = header.search(backwards)
         if body is not None:
-            close = data.find(b"endobj", body.end())
+            after = size - body.start()  # where `obj` ends in the file
+            close = data.find(b"endobj", after)
             if close >= 0:
-                found = PDF_CREATION.search(data, body.end(), close)
-                return literal(data, found) if found else None
-    last = last_match(PDF_CREATION, data)
-    return literal(data, last) if last else None
+                found = PDF_CREATION.search(data, after, close)
+                return literal(data, found.end()) if found else None
+    last = PDF_CREATION_REVERSED.search(backwards)
+    return literal(data, size - last.start()) if last else None
 
 
 def front_matter_date(text: str) -> str | None:

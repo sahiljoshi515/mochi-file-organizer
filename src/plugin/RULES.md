@@ -20,9 +20,11 @@ one name equal to it in Unicode NFC form names it); `.` names your whole agent f
   junk names included) is **left exactly as it was**: never moved, changed or deleted, and no new
   hidden file or folder may appear anywhere in the folder.
 - **Everything outside the folder** in your agent folder is also left exactly as it was, and nothing
-  new may appear there. The one exception is the plugin's own run state: `.file-organizer/state.json`
-  at the top of your agent folder, and the `.file-organizer/` folder that holds it (anything else in
-  that folder is left as it was too).
+  new may appear there. The one exception is the plugin's own run state: a regular file
+  `.file-organizer/state.json` at the top of your agent folder that holds the run state the plugin
+  writes (a JSON object with the fields `version`, `token`, `folder`, `hash_length`, `taken`, `rows`,
+  `applied`, `calls` and `summary`) or is absent, and the `.file-organizer/` folder that holds it.
+  Anything else in that folder is left exactly as it was too.
 - Every other regular file in the folder takes part. Archives are never unpacked. A path's depth is
   its number of `/`.
 - **Refused** before anything happens, with a message that says what to fix:
@@ -30,7 +32,8 @@ one name equal to it in Unicode NFC form names it); `.` names your whole agent f
     anywhere in your agent folder, `.file-organizer/` included;
   - a file or folder there that cannot be read: a file whose owner may not read it, a folder whose
     owner may not open it (read and search), or anything whose reading fails;
-  - a `.file-organizer` at the top of your agent folder that is not a folder;
+  - a `.file-organizer` at the top of your agent folder that is not a folder, or a
+    `.file-organizer/state.json` that is not a regular file;
   - more than 1,000 files that take part, more than 200 MiB of them, or one over 10 MiB;
   - more than 1 GiB in your whole agent folder (every file there is read to check the run);
   - a file that takes part deeper than 12 folders, or with a path longer than 300 characters
@@ -101,11 +104,15 @@ in this order and the first match wins. A match gives a folder pair `<group>/<ty
   starts with a frame header and, if it holds at least that frame's length plus 4 bytes, a second
   header with the same version and layer starts right after the first frame.
 - **Zips** are read from their end-of-central-directory record: the last `PK\5\6` in the final 65,557
-  bytes whose comment length (bytes 20-21 of the record) reaches exactly the end of the file. Its
-  central directory is read at the offset the record gives (bytes 16-19), counted from the start of
-  the file, entry by entry while each starts `PK\1\2`. A zip without such a record, or whose record
-  gives the offset `FFFFFFFF` (ZIP64), has no names.
-  - **Office**: a central directory holding `word/document.xml` is Word, `xl/workbook.xml` or
+  bytes whose comment length (bytes 20-21 of the record) reaches exactly the end of the file, of the
+  last 16 `PK\5\6` there. Its central directory spans from the offset the record gives (bytes 16-19,
+  counted from the start of the file) to the record. A name is looked up in that span: the entry
+  named N is the first place in it where a central-directory header (`PK\1\2` and 42 more bytes,
+  whose name-length field, bytes 28-29, holds N's length in bytes) is followed by N; its flags, method,
+  packed size and local header's offset are the header's (bytes 8-9, 10-11, 20-23, 42-45). A zip
+  without such a record, whose record gives the offset `FFFFFFFF` (ZIP64), or whose offset lies past
+  the record, has no names.
+  - **Office**: a zip holding `word/document.xml` is Word, `xl/workbook.xml` or
     `xl/workbook.bin` Excel, `ppt/presentation.xml` PowerPoint (checked in that order). The content
     type of that main part (the `Override` for its part name in `[Content_Types].xml`, part names
     compared ignoring case, else the `Default` for its file extension; the first such element of
@@ -144,8 +151,9 @@ in this order and the first match wins. A match gives a folder pair `<group>/<ty
      starts `<!doctype html` or `<html`, ignoring case → documents/html; `head` starts `{\rtf` →
      documents/rtf; `head` starts `{` or `[`, no array or object is nested more than 512 deep, and
      `text` is JSON by RFC 8259 (so `NaN` and `Infinity` are not JSON) → data/json; `first` starts `# `
-     or is `---` → documents/md; at least 3 non-blank lines (a blank line holds only whitespace), all
-     with the same number of commas, at least one → spreadsheets/csv; `first` starts
+     or is `---` → documents/md; among the first 1,000 lines, at least 3 non-blank ones (a blank line
+     holds only whitespace), all with the same number of commas, at least one → spreadsheets/csv;
+     `first` starts
      `YYYY-MM-DD HH:MM:SS` or `YYYY-MM-DDTHH:MM:SS` (digits, not checked as a date) → data/log;
      otherwise documents/txt. So a text file without an extension (`Makefile`) is txt.
 
@@ -162,7 +170,7 @@ A file's date is the first of these that gives a real calendar date:
    | heic, avif | the first item of type `Exif` (the top-level `meta` box → its first `iinf` → its first `iloc` extents, in the file or in its first `idat`): its first 4 bytes say how many bytes after them the TIFF starts (a leading `Exif\0\0` there is skipped) → Exif IFD → tag `9003` |
    | cr3 | the first top-level `moov` box → its first Canon `uuid` box (`85c0b687-820f-11e0-8111-f4ce462b6a48`) → its first `CMT2` box, a TIFF whose first IFD holds tag `9003`; when that gives no real date, its first `CMT1` box as TIFF → Exif IFD → tag `9003` |
    | webp | the `EXIF` chunk (a leading `Exif\0\0` is skipped) → Exif IFD → tag `9003` |
-   | png | the first `eXIf` chunk (a leading `Exif\0\0` is skipped) → Exif IFD → tag `9003`; else the first `tEXt` chunk with the keyword `Creation Time` decides: its text (Latin-1), after optional space, starts `YYYY-MM-DD`, or else three ASCII letters and a comma and optional space (optional), a 1- or 2-digit day, space, three ASCII letters naming an English month (`Jan` … `Dec`, any case), space, a 4-digit year |
+   | png | the first `eXIf` chunk (a leading `Exif\0\0` is skipped) → Exif IFD → tag `9003`; else the first `tEXt` chunk with the keyword `Creation Time` decides: the first 64 bytes of its text (Latin-1), after optional space, start `YYYY-MM-DD`, or else three ASCII letters and a comma and optional space (optional), a 1- or 2-digit day, space, three ASCII letters naming an English month (`Jan` … `Dec`, any case), space, a 4-digit year |
    | pdf | the document information dictionary: the last `/Info N G R` in the file names object `N G`; when that object is written out plainly (the last `N G obj` … `endobj` in the file), its `/CreationDate (` literal decides, or there is no PDF date. When there is no `/Info` reference or the object is not written out plainly (inside a compressed object stream), the last `/CreationDate (` literal anywhere in the file decides. A literal's value is the text up to the next `)` (at most 64 bytes), read as `D:YYYYMMDD…` or `YYYYMMDD…` |
    | docx, docm, dotx, dotm, xlsx, xlsm, xltx, xltm, xlam, xlsb, pptx, pptm, potx, potm, ppsx, ppsm, ppam | the zip entry `docProps/core.xml`: the text of the first element written `dcterms:created`, after optional space, starting `YYYY-MM-DD` |
    | odt, ods, odp | the zip entry `meta.xml`: the text of the first element written `meta:creation-date`, after optional space, starting `YYYY-MM-DD` |
@@ -181,9 +189,30 @@ chunk that runs past the end of the file is not read; an IFD at an offset under 
 1,024 entries, or whose entries run past the end, is not read; a DateTimeOriginal longer than 64
 bytes or running past the end is not read; an ISO box whose size is under its header (8 bytes, or 16
 with a 64-bit size) or runs past its parent stops the walk of that parent (size 0 runs to the end of
-the parent); a zip entry that is encrypted, uses a method other than stored or deflate, holds more
-than 1 MiB, has no `PK\3\4` header at its offset, or whose data does not decompress is not read. A
-file is never refused for its content.
+the parent); a zip entry that is encrypted, uses a method other than stored or deflate, has no
+`PK\3\4` header at its offset, whose data runs past the end of the file, or whose data is not valid
+DEFLATE as far as it is read (by the rules of RFC 1951 as puff.c checks them: no over-subscribed
+code, an incomplete code only as a single code of length 1, a complete code-length code), is not
+read. A file is never refused for its content.
+
+**Reading limits.** Every structure is read only so far, so a folder at the limits of §1 is checked in
+bounded time; what lies beyond is not read, and a date there is not found:
+
+| What | Read as far as |
+|---|---|
+| a zip part (`[Content_Types].xml`, `docProps/core.xml`, `meta.xml`, `mimetype`) | its first 4,096 bytes of content, and of a deflated part only its first 4 DEFLATE blocks |
+| the zip end record | the last 16 `PK\5\6` in the final 65,557 bytes |
+| JPEG | the first 64 markers after SOI (each `FF` fill byte counts as one) |
+| PNG, RIFF (WebP) | the first 1,024 chunks |
+| ISO media (MP4, MOV, M4A, HEIF, AVIF, CR3) | the first 1,024 boxes of the file and of any one box |
+| a TIFF IFD | 1,024 entries (an IFD with more is not read) |
+| HEIF `iloc` | its first 1,024 items, holding 1,024 extents in all (the item past that budget, and those after it, are not read) |
+| a HEIF Exif item | the first 1 MiB of its extents, in order |
+| an `ftyp` box | its first 1,024 compatible brands |
+| a PNG `tEXt` date | the first 64 bytes of its text |
+| Markdown front matter, the CSV test | the first 1,000 lines |
+
+The raw value pinned with an embedded date is at most its first 64 characters.
 
 Out of scope, giving no embedded date: XMP, PDF dates written in hex or UTF-16, PDF information inside
 compressed object streams (the fallback above applies), `zTXt` and `iTXt`, PNG `tIME`, ID3 years,

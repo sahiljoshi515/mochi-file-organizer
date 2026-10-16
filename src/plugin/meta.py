@@ -38,6 +38,7 @@ LEADING_DATE = re.compile(r"\s*([0-9]{4})-([0-9]{2})-([0-9]{2})")
 FRONT_DATE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 MONTHS = {name: index for index, name in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 SECONDS_1904_TO_1970 = 2082844800
+RAW_LIMIT = 64  # the most of a date's raw value that is read and kept
 OOXML = frozenset(["docx", "docm", "dotx", "dotm", "xlsx", "xlsm", "xltx", "xltm", "xlam", "xlsb", "pptx", "pptm", "potx", "potm", "ppsx", "ppsm", "ppam"])
 ODF_KINDS = frozenset({"odt", "ods", "odp"})
 SEARCHED = frozenset({"heic", "avif"})
@@ -50,7 +51,7 @@ def dated(source: str, raw: str, found: re.Match | None) -> Found | None:
     if found is None:
         return None
     date = real_date(int(found.group(1)), int(found.group(2)), int(found.group(3)), EMBEDDED_YEARS)
-    return (source, raw, date) if date else None
+    return (source, raw[:RAW_LIMIT], date) if date else None
 
 
 def exif_date(tiff: bytes | None) -> Found | None:
@@ -63,32 +64,30 @@ def exif_value(raw: str | None) -> Found | None:
 
 def png_date(data: bytes) -> Found | None:
     chunks = png_chunks(data)
-    for kind, body in chunks:
+    for kind, start, end in chunks:
         if kind == b"eXIf":
-            found = exif_date(body[6:] if body.startswith(b"Exif\x00\x00") else body)
+            found = exif_date(data[start:end].removeprefix(b"Exif\x00\x00"))
             if found:
                 return found
             break
-    for kind, body in chunks:
-        if kind == b"tEXt":
-            keyword, _sep, text = body.partition(b"\x00")
-            if keyword == b"Creation Time":
-                raw = text.decode("latin-1")
-                found = dated(PNG_TEXT, raw, ISO_DATE.match(raw))
-                if found:
-                    return found
-                rfc = RFC_DATE.match(raw)
-                if rfc and rfc.group(2).lower() in MONTHS:
-                    date = real_date(int(rfc.group(3)), MONTHS[rfc.group(2).lower()], int(rfc.group(1)), EMBEDDED_YEARS)
-                    return (PNG_TEXT, raw, date) if date else None
-                return None
+    for kind, start, end in chunks:
+        if kind == b"tEXt" and data.startswith(b"Creation Time\x00", start, end):
+            raw = data[start + 14 : min(end, start + 14 + RAW_LIMIT)].decode("latin-1")
+            found = dated(PNG_TEXT, raw, ISO_DATE.match(raw))
+            if found:
+                return found
+            rfc = RFC_DATE.match(raw)
+            if rfc and rfc.group(2).lower() in MONTHS:
+                date = real_date(int(rfc.group(3)), MONTHS[rfc.group(2).lower()], int(rfc.group(1)), EMBEDDED_YEARS)
+                return (PNG_TEXT, raw, date) if date else None
+            return None
     return None
 
 
 def webp_date(data: bytes) -> Found | None:
-    for fourcc, body in riff_chunks(data):
+    for fourcc, start, end in riff_chunks(data):
         if fourcc == b"EXIF":
-            return exif_date(body[6:] if body.startswith(b"Exif\x00\x00") else body)
+            return exif_date(data[start:end].removeprefix(b"Exif\x00\x00"))
     return None
 
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from builders import edge_files
+from builders import edge_files, limit_files
 from messy import messy, organized_folder, unpack
 from oracle.oracle import facts as oracle_facts
 from oracle.oracle import organize
@@ -52,6 +52,15 @@ def test_edge_files_agree_with_the_oracle(name: str) -> None:
     """The review's edge files (wide and legacy text, the Office family, QuickTime, MPEG-TS, CR3, PDF
     information, JSON depth, zip end records, …): the plugin and the oracle read each one alike."""
     data = edge_files()[name]
+    fact = describe(name, data)
+    want = oracle_facts(name, data)
+    assert {field: getattr(fact, field) for field in FACT_FIELDS} == {field: want[field] for field in FACT_FIELDS}
+
+
+@pytest.mark.parametrize("name", sorted(limit_files()))
+def test_files_at_the_reading_limits_agree_with_the_oracle(name: str) -> None:
+    """Just inside and just past every reading limit of RULES.md §3: the plugin and the oracle stop alike."""
+    data = limit_files()[name]
     fact = describe(name, data)
     want = oracle_facts(name, data)
     assert {field: getattr(fact, field) for field in FACT_FIELDS} == {field: want[field] for field in FACT_FIELDS}

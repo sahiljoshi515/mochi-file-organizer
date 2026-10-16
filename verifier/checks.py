@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from .sniff import JSON_DEPTH, json_depth
 from .walk import STATE_DIR, STATE_FILE
 
 SHOWN = 10
@@ -38,8 +39,9 @@ def read_state(workspace):
     if not path.is_file():
         return None
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
+        text = path.read_text(encoding="utf-8")
+        state = json.loads(text) if json_depth(text) <= JSON_DEPTH else None
+    except (ValueError, RecursionError):
         return None
     keys = {"version", "token", "folder", "hash_length", "taken", "rows", "applied", "calls", "summary"}
     return state if isinstance(state, dict) and keys <= set(state) else None

@@ -28,4 +28,7 @@ plugin = ["RULES.md"]
 [tool.pytest.ini_options]
 # contract.py and verifier/ live at the plugin root.
 pythonpath = ["."]
-markers = ["corpus: needs the real-file corpus (python tests/corpus/fetch.py; or set FILE_ORGANIZER_CORPUS=1 to fetch it)"]
+markers = [
+    "corpus: needs the real-file corpus (python tests/corpus/fetch.py; or set FILE_ORGANIZER_CORPUS=1 to fetch it)",
+    "perf: times every verifier call at the published limits (opt-in: FILE_ORGANIZER_PERF=1)",
+]

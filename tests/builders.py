@@ -16,6 +16,7 @@ import struct
 import tarfile
 import wave
 import zipfile
+import zlib
 
 from PIL import Image
 
@@ -487,4 +488,74 @@ def edge_files() -> dict[str, bytes]:
         "a.orf": b"IIRO\x08\x00\x00\x00",
         "zip.bin": plain_zip(1, None),
         "zip.jpeg": plain_zip(2, None),
+    }
+
+
+def blocky_deflate(data: bytes, block: int = 1024) -> bytes:
+    """Raw DEFLATE with a new block every `block` bytes."""
+    packer = zlib.compressobj(9, zlib.DEFLATED, -15)
+    packed = b"".join(packer.compress(data[at : at + block]) + packer.flush(zlib.Z_BLOCK) for at in range(0, len(data), block))
+    return packed + packer.flush()
+
+
+def hand_zip(entries: list[tuple[str, bytes, bytes | None]], comment: bytes = b"") -> bytes:
+    """A zip written by hand: (name, data, raw DEFLATE of it or None to store it), then a comment."""
+    local, directory = io.BytesIO(), io.BytesIO()
+    for name, data, packed in entries:
+        method, body = (0, data) if packed is None else (8, packed)
+        raw_name, crc, offset = name.encode(), zlib.crc32(data), local.tell()
+        local.write(struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0, method, 0, 0x21, crc, len(body), len(data), len(raw_name), 0) + raw_name + body)
+        directory.write(struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0, method, 0, 0x21, crc, len(body), len(data), len(raw_name), 0, 0, 0, 0, 0, offset) + raw_name)
+    table = directory.getvalue()
+    end = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(table), local.tell(), len(comment))
+    return local.getvalue() + table + end + comment
+
+
+def core_at(offset: int, date: str = "2016-05-04") -> bytes:
+    """docProps/core.xml whose dcterms:created element starts `offset` bytes in."""
+    head = b"<cp:coreProperties><!--"
+    return head + b"x" * (offset - len(head) - 3) + b"--><dcterms:created>" + date.encode() + b"</dcterms:created></cp:coreProperties>"
+
+
+def limit_files() -> dict[str, bytes]:
+    """Files just inside and just past each reading limit of RULES.md §3 (and the zip end record's)."""
+    types = b'<Types><Override PartName="/word/document.xml" ContentType="application/vnd.ms-word.document.macroEnabled.main+xml"/></Types>'
+    late_types = b"<Types><!--" + b"y" * 4100 + b'--><Override PartName="/word/document.xml" ContentType="application/vnd.ms-word.document.macroEnabled.main+xml"/></Types>'
+
+    def office(core: bytes, packed_core: bytes | None, content_types: bytes = types) -> bytes:
+        return hand_zip([("[Content_Types].xml", content_types, blocky_deflate(content_types)), ("word/document.xml", b"<w:document/>", None), ("docProps/core.xml", core, packed_core)])
+
+    near, far = core_at(3900), core_at(4200)
+    exif_app1 = b"\xff\xe1" + struct.pack(">H", 2 + len(exif_bytes("2012-03-04"))) + exif_bytes("2012-03-04")
+    comments = lambda count: b"\xff\xfe\x00\x02" * count
+    empty_chunk = struct.pack(">I", 0) + b"aaAa" + struct.pack(">I", zlib.crc32(b"aaAa"))
+    text_chunk = lambda text: struct.pack(">I", len(text)) + b"tEXt" + text + struct.pack(">I", zlib.crc32(b"tEXt" + text))
+    png_head = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0) + b"\x00" * 4
+    webp_exif = b"EXIF" + struct.pack("<I", len(exif_bytes("2013-04-05")[6:])) + exif_bytes("2013-04-05")[6:]
+    webp = lambda junk: b"RIFF" + struct.pack("<I", 4 + 8 * junk + len(webp_exif)) + b"WEBP" + b"JUNK\x00\x00\x00\x00" * junk + webp_exif
+    mvhd = full_box(b"mvhd", 0, 0, struct.pack(">IIII", 3_500_000_000, 3_500_000_000, 600, 600) + b"\x00" * 80)
+    mp4 = lambda free: box(b"ftyp", b"isom\x00\x00\x00\x00isom") + box(b"free", b"") * free + box(b"moov", mvhd)
+    document = office(near, None)
+    end = document.rindex(b"PK\x05\x06")
+    strays = b"PK\x05\x06" * 16
+    return {
+        "within reach.docx": office(near, blocky_deflate(near)),
+        "past reach.docx": office(far, blocky_deflate(far)),
+        "fifth block.docx": office(core_at(4100 - 1024), blocky_deflate(core_at(4100 - 1024), block=700)),
+        "stored past reach.docx": office(far, None),
+        "late override.docx": office(near, None, late_types),
+        "16 strays.docx": document[: end + 20] + struct.pack("<H", len(strays[:-4])) + strays[:-4],
+        "17 strays.docx": document[: end + 20] + struct.pack("<H", len(strays)) + strays,
+        "markers within.jpg": b"\xff\xd8" + comments(62) + exif_app1 + b"\xff\xda\x00\x02\xff\xd9",
+        "markers past.jpg": b"\xff\xd8" + comments(64) + exif_app1 + b"\xff\xda\x00\x02\xff\xd9",
+        "chunks within.png": png_head + empty_chunk * 1022 + text_chunk(b"Creation Time\x002015-06-07"),
+        "chunks past.png": png_head + empty_chunk * 1023 + text_chunk(b"Creation Time\x002015-06-07"),
+        "text within.png": png_head + text_chunk(b"Creation Time\x00" + b" " * 54 + b"2015-06-07"),
+        "text past.png": png_head + text_chunk(b"Creation Time\x00" + b" " * 55 + b"2015-06-07"),
+        "chunks within.webp": webp(1023),
+        "chunks past.webp": webp(1024),
+        "boxes within.mp4": mp4(1022),
+        "boxes past.mp4": mp4(1023),
+        "csv 1000 lines": b"a,b\n" * 999 + b"a,b,c\n",
+        "csv 1001 lines": b"a,b\n" * 1000 + b"a,b,c\n",
     }

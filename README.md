@@ -120,6 +120,7 @@ uv sync --extra dev
 uv run pytest                       # offline: unit, property, differential and replay tests
 uv run python tests/corpus/fetch.py # optional: download the real-file corpus (licences in tests/corpus/sources.json)
 uv run pytest -m corpus             # the same checks on folders built from real files
+FILE_ORGANIZER_PERF=1 uv run pytest -m perf   # every verifier call at the published limits, timed
 uv run ruff check .
 ```
 
@@ -129,7 +130,7 @@ Python):
 
 ```bash
 python scripted_task.py . tests/cases/gold_small.json --sandbox seatbelt   # one case
-python run_cases.py . tests/cases --jobs 4 --sandbox seatbelt              # all 38, with timings
+python run_cases.py . tests/cases --jobs 4 --sandbox seatbelt              # all 40, with timings
 uv run python tests/corpus/real_cases.py /tmp/real-cases 9                 # cases on real-file folders
 python run_cases.py . /tmp/real-cases --sandbox seatbelt
 ```
@@ -137,11 +138,11 @@ python run_cases.py . /tmp/real-cases --sandbox seatbelt
 Each case unpacks an agent folder (`tests/cases/folders/*.tar.gz`), lets the reference pin the answer
 key from a copy of it, then runs `survey`, a python step that decides the rows exactly as the
 instructions say (`tests/cases/agent.py`), `apply` twice and `submit`. The 12 gold cases must be valid
-at 1.0; each of the 26 wrong cases makes one mistake (keeping the wrong copy, moving a duplicate,
+at 1.0; each of the 28 wrong cases makes one mistake (keeping the wrong copy, moving a duplicate,
 swapping collision numbers, skipping a call, moving junk, a false summary, tampering, a stray file, a
 copy left behind, a number outside the run; and the review's red team: hidden entries changed, removed
 or added, files outside the folder changed or added, empty folders left, a FIFO, an unreadable file, a
-symlink in the folder) and must fail the constraint it breaks. `tests/test_cases.py` replays them all
+symlink in the folder, a duplicate or a folder stashed at the run state's path) and must fail the constraint it breaks. `tests/test_cases.py` replays them all
 without NanoAgent. `tests/cases/build_cases.py` rebuilds every case and its folder from the
 builders, deterministically.
 
@@ -162,4 +163,11 @@ downloaded at test time, never committed.
   object streams, no ID3 or QuickTime text dates); RW2, ORF, RAF and other raw files that are not
   TIFF-shaped are undated unless their name carries a date. Text in legacy encodings other than
   Windows-1252 (Shift-JIS, MacRoman, …) is not recognized as text.
+- Every structure is read only so far (RULES.md §3, "Reading limits"): a zip part's first 4,096 bytes
+  and 4 DEFLATE blocks, a JPEG's first 64 markers, 1,024 PNG/RIFF chunks or ISO boxes, the first 1,000
+  lines of text. A date beyond them is not found. In exchange the verifier, which re-derives every
+  file's facts and runs each check twice within NanoAgent's 60 s, takes at most about 13 s per call at
+  the limits (1,000 files, 200 MiB, a 1 GiB agent folder) on the development Mac, in the costliest
+  folder we could build (dense Office metadata in 982 files, 10 MiB JSON texts in the rest):
+  `tests/test_perf.py` holds every call under 20 s.
 - Embedded dates are taken as stored, with no time-zone conversion.

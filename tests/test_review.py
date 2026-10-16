@@ -3,6 +3,7 @@ RULES.md says. Scripted, end-to-end versions of the tampering scenarios are the 
 
 from __future__ import annotations
 
+import json
 import shutil
 import struct
 import sys
@@ -152,13 +153,68 @@ def state_deleted(workspace, _output):
 
 
 def state_rewritten(workspace, _output):
-    (workspace / ".file-organizer/state.json").write_text('{"applied": []}')
+    path = workspace / ".file-organizer/state.json"
+    state = json.loads(path.read_text())
+    state["applied"], state["rows"] = [], []
+    path.write_text(json.dumps(state))
 
 
 @pytest.mark.parametrize("tamper", [state_deleted, state_rewritten])
 def test_fo02_the_run_state_is_the_one_exception(tmp_path: Path, tamper) -> None:
     verdict = after(tmp_path, tamper)
     assert verdict["valid"] and verdict["score"] == 1.0, verdict["message"]
+
+
+# ----- R2-01: the exemption is a regular state.json holding the run state, nothing else -----
+
+
+def duplicate_onto_state(workspace, output):
+    (workspace / ".file-organizer/state.json").write_bytes(CANON)  # the duplicate kept, under the state's name
+
+
+def state_not_a_run_state(workspace, _output):
+    (workspace / ".file-organizer/state.json").write_text("{}")
+
+
+@pytest.mark.parametrize("tamper", [duplicate_onto_state, state_not_a_run_state])
+def test_r2_01_state_json_must_hold_the_run_state(tmp_path: Path, tamper) -> None:
+    verdict = after(tmp_path, tamper)
+    assert failed(verdict) == ["outside-untouched"] and ".file-organizer/state.json is not the run state the plugin writes" in verdict["message"]
+    files = {path.removeprefix("Downloads/"): data for path, data in base_folder().items()}
+    whole = after(tmp_path / "whole", tamper, files, ".")
+    assert failed(whole) == ["hidden-untouched"], whole["message"]
+
+
+def state_replaced_by_folder(workspace, _output):
+    import os
+
+    state = workspace / ".file-organizer/state.json"
+    state.unlink()
+    (state / "stash").mkdir(parents=True)
+    (state / "stash/Canon copy.jpg").write_bytes(CANON)
+    (state / "stash/etc-link").symlink_to("/etc")
+    os.mkfifo(state / "pipe")
+
+
+def state_sibling(workspace, _output):
+    (workspace / ".file-organizer/state.json.bak").write_text("x")
+
+
+def test_r2_01_a_folder_or_a_sibling_at_the_state_path_fails(tmp_path: Path) -> None:
+    folder = after(tmp_path / "folder", state_replaced_by_folder)
+    assert folder["score"] == 0.0 and failed(folder) == ["plain-entries"]
+    assert ".file-organizer/state.json is not a regular file, but the plugin keeps its run state there" in folder["message"]
+    sibling = after(tmp_path / "sibling", state_sibling)
+    assert failed(sibling) == ["outside-untouched"] and ".file-organizer/state.json.bak is new" in sibling["message"]
+
+
+def test_r2_01_tools_refuse_a_state_path_that_is_not_a_file(tmp_path: Path) -> None:
+    unpack(base_folder(), tmp_path)
+    (tmp_path / ".file-organizer/state.json").mkdir(parents=True)
+    for tool in (organizer.pin_layout, organizer.survey):
+        organizer.RUN = None
+        with pytest.raises(ValueError, match=r"\.file-organizer/state\.json is not a regular file"):
+            tool(OrganizeInput(folder=FOLDER), tmp_path)
 
 
 def test_fo02_hidden_and_outside_hold_for_the_whole_agent_folder(tmp_path: Path) -> None:
@@ -410,8 +466,12 @@ def test_fo16_malformed_structures_give_no_date() -> None:
     for comment in (b"PK\x05\x06" + b"\x00" * 14, b"PK\x05\x06" + b"\x00" * 16 + struct.pack("<H", 7)):  # a stray end record in the comment
         commented = document[: end + 20] + struct.pack("<H", len(comment)) + comment
         assert kind("letter.docx", commented) == "documents/docx/docx"
-    forged = document[: end + 20] + struct.pack("<H", 22) + b"PK\x05\x06" + b"\x00" * 18  # one that does reach the end: it is read
-    assert kind("letter.docx", forged) == "archives/zip/zip"
+    # a stray record that does reach the end of the file is the one read: its directory starts where it says
+    forged_at = end + 22
+    forged = document[: end + 20] + struct.pack("<H", 22) + b"PK\x05\x06" + b"\x00" * 12 + struct.pack("<IH", forged_at, 0)
+    assert kind("letter.docx", forged) == "archives/zip/zip"  # its directory (from itself to itself) holds no names
+    pointing_back = document[: end + 20] + struct.pack("<H", 22) + b"PK\x05\x06" + b"\x00" * 12 + struct.pack("<IH", 0, 0)
+    assert kind("letter.docx", pointing_back) == "documents/docx/docx"  # from the file's start: the real headers are in it
     assert kind("letter.docx", document + b"trailing bytes") == "archives/zip/zip"  # no end record reaches the end: no names
 
 
@@ -519,3 +579,53 @@ def test_fo13_cr3_falls_back_to_cmt1_when_cmt2_gives_no_real_date() -> None:
     data = builders.cr3(cmt1, blank)
     assert describe("blank.cr3", data).date == "2018-02-21"
     assert oracle_facts("blank.cr3", data)["date"] == "2018-02-21"
+
+
+# ----- R2-02: every reader stops at a written limit, so the verifier's work is bounded -----
+
+
+@pytest.mark.parametrize(
+    ("name", "found"),
+    [
+        ("within reach.docx", "documents/docm/docm 2016-05-04"),
+        ("past reach.docx", "documents/docm/docm None"),  # the date lies past the part's first 4,096 bytes
+        ("fifth block.docx", "documents/docm/docm None"),  # or in its fifth DEFLATE block
+        ("stored past reach.docx", "documents/docm/docm None"),
+        ("late override.docx", "documents/docx/docx 2016-05-04"),  # the content type lies past the reach: the plain docx
+        ("16 strays.docx", "documents/docm/docm 2016-05-04"),
+        ("17 strays.docx", "archives/zip/zip None"),  # the end record is the 17th PK 5 6 from the end: not tried
+        ("markers within.jpg", "images/jpg/jpg 2012-03-04"),
+        ("markers past.jpg", "images/jpg/jpg None"),
+        ("chunks within.png", "images/png/png 2015-06-07"),
+        ("chunks past.png", "images/png/png None"),
+        ("text within.png", "images/png/png 2015-06-07"),
+        ("text past.png", "images/png/png None"),
+        ("chunks within.webp", "images/webp/webp 2013-04-05"),
+        ("chunks past.webp", "images/webp/webp None"),
+        ("boxes within.mp4", "video/mp4/mp4 2014-11-28"),
+        ("boxes past.mp4", "video/mp4/mp4 None"),
+        ("csv 1000 lines", "documents/txt/txt None"),
+        ("csv 1001 lines", "spreadsheets/csv/csv None"),  # line 1,001 is past the CSV test's reach
+    ],
+)
+def test_r2_02_readers_stop_at_their_written_limits(name: str, found: str) -> None:
+    fact = describe(name, builders.limit_files()[name])
+    assert f"{fact.group}/{fact.type}/{fact.ext} {fact.date}" == found
+
+
+def test_r2_02_the_costliest_files_describe_in_bounded_time() -> None:
+    """The review's perf_probe files, each at most ~10 MiB: none takes more than a few milliseconds per MiB."""
+    import random as rng_module
+
+    from perf import worst
+
+    rng = rng_module.Random(2)
+    for build in (*[build for _ext, build in worst.KINDS], lambda rng, size: worst.dense_docx(rng, 8192, 1500)):
+        data = build(rng, 10 * 1024 * 1024 - 4096)
+        started = time.perf_counter()
+        describe("probe", data)
+        assert time.perf_counter() - started < 0.4, build
+    dense = worst.challenger_dense(1)
+    started = time.perf_counter()
+    describe("dense-meta.docx", next(iter(dense.values())))  # 1.5 s before the limits; now the first 4,096 bytes
+    assert time.perf_counter() - started < 0.05

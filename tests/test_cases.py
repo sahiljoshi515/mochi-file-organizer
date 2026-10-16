@@ -113,7 +113,7 @@ def test_the_cases_cover_every_wrong_row() -> None:
     for tamper in (
         "hidden_deleted", "hidden_modified", "hidden_stray_copy", "duplicate_hidden", "duplicate_into_hidden_folder", "junk_hidden",
         "outside_deleted", "outside_modified", "duplicate_moved_outside", "empty_folder_left", "junk_replaced_by_folder",
-        "fifo_added", "unreadable_target", "unreadable_input", "symlink_file", "symlink_folder",
+        "fifo_added", "unreadable_target", "unreadable_input", "symlink_file", "symlink_folder", "state_stash_file", "state_stash_folder",
     ):  # fmt: skip
         assert f"wrong_{tamper}" in names  # the review's red team (FO-01 to FO-05)
     assert sum(name.startswith("gold_") for name in names) >= 7

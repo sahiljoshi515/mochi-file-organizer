@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from .formats import number, zip_entries, zip_member, zip_read
+from .formats import FRONT_LINES, number, zip_entry, zip_member, zip_read
 
 RAW_EXTS = frozenset(["dng", "nef", "cr2", "arw", "orf", "rw2", "pef", "srw", "nrw", "3fr", "erf", "kdc", "mos", "mef", "iiq"])
 TEXT_GROUPS = {
@@ -79,8 +79,10 @@ CP1252_HIGH = (
     "\x90\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\x9d\u017e\u0178"
 )
 CP1252 = {0x80 + index: char for index, char in enumerate(CP1252_HIGH)}
-CP1252_UNDEFINED = re.compile(rb"[\x81\x8d\x8f\x90\x9d]")
-LEGACY_CONTROL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f]")
+# Bytes that keep a file from being Windows-1252 text: NUL and the other control characters but tab,
+# line feed, form feed and carriage return, and the five bytes Windows-1252 leaves undefined.
+LEGACY_REFUSED = re.compile(rb"[\x00-\x08\x0b\x0e-\x1f\x7f\x81\x8d\x8f\x90\x9d]")
+CSV_LINES = 1000
 # A JSON string, or an unterminated one running to the end: possessive, so stripping strings is linear.
 JSON_STRING = re.compile(r'"(?:[^"\\]|\\(?:.|\Z))*+(?:"|\Z)', re.DOTALL)
 NOT_BRACKET = re.compile(r"[^\[\]{}]+")
@@ -96,6 +98,7 @@ BITRATES = {
     (False, 3): (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
 }
 SAMPLE_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+BRANDS = 1024  # an ftyp box is read for its first 1,024 compatible brands
 TS_PACKET = 188
 TS_PACKETS = 20
 
@@ -144,21 +147,20 @@ def decoded(data: bytes) -> str | None:
     return None if "\x00" in text else text
 
 
-def legacy_text(data: bytes, claimed: str) -> str | None:
-    """Row 20: Windows-1252 text in a file that claims a text extension, or None."""
-    if normalized(claimed) not in TEXT_GROUPS or b"\x00" in data or CP1252_UNDEFINED.search(data):
-        return None
-    text = data.decode("latin-1").translate(CP1252)
-    return None if LEGACY_CONTROL.search(text) else text
+def legacy(data: bytes, claimed: str) -> bool:
+    """Row 20: whether `data` is Windows-1252 text in a file that claims a text extension. Its content
+    is never needed to type it (the claimed extension decides), so the bytes alone are checked."""
+    return normalized(claimed) in TEXT_GROUPS and LEGACY_REFUSED.search(data) is None
 
 
 def as_text(data: bytes, claimed: str) -> str | None:
-    """The text a text row reads from `data` (rows 10, 19 and 20, in that order), or None."""
+    """The text a text row reads from `data` (rows 10, 19 and 20, in that order), or None; Windows-1252
+    text only as far as its first 1,000 lines (the front matter's reach)."""
     text = wide_text(data)
     if text is None:
         text = decoded(data)
-    if text is None:
-        text = legacy_text(data, claimed)
+    if text is None and legacy(data, claimed):
+        text = b"\n".join(data.split(b"\n", FRONT_LINES)[:FRONT_LINES]).decode("latin-1").translate(CP1252)
     return text
 
 
@@ -173,21 +175,21 @@ def not_a_constant(name: str) -> None:
 
 
 def is_json(text: str) -> bool:
-    """RFC 8259 JSON nested at most 512 deep (NaN and Infinity are not JSON)."""
-    if json_depth(text) > JSON_DEPTH:
-        return False
+    """RFC 8259 JSON nested at most 512 deep (NaN and Infinity are not JSON). The parser runs first: a
+    RecursionError (only ever far deeper than 512) or a parse error is "not JSON" either way, so the
+    answer does not depend on the stack, and most text that is not JSON fails fast."""
     try:
         json.loads(text, parse_constant=not_a_constant, parse_int=str, parse_float=str)
     except (ValueError, RecursionError):
         return False
-    return True
+    return json_depth(text) <= JSON_DEPTH
 
 
 def is_csv(text: str) -> bool:
-    """At least 3 non-blank lines, all with the same number of commas, at least one."""
+    """Among the first 1,000 lines: at least 3 non-blank lines, all with the same number of commas, at least one."""
     count = None
     lines = 0
-    for line in text.split("\n"):
+    for line in text.split("\n", CSV_LINES)[:CSV_LINES]:
         if not line.strip():
             continue
         commas = line.count(",")
@@ -285,7 +287,7 @@ def transport_stream(data: bytes) -> bool:
 def iso_kind(data: bytes) -> Kind:
     size = int.from_bytes(data[0:4], "big")
     major = data[8:12]
-    end = min(len(data), size) if size >= 16 else 16
+    end = min(len(data), size, 16 + 4 * BRANDS) if size >= 16 else 16
     compatible = {data[at : at + 4] for at in range(16, end - 3, 4)}
     if major in AVIF_BRANDS or (major in (b"mif1", b"msf1") and compatible & AVIF_BRANDS):
         return Kind("images", "avif", "avif")
@@ -324,9 +326,9 @@ def content_type(data: bytes, part: str) -> str | None:
     return override if override is not None else default
 
 
-def office_kind(data: bytes, names: set[str], claimed: str) -> Kind | None:
+def office_kind(data: bytes, claimed: str) -> Kind | None:
     for parts, group, plain, types in OFFICE:
-        part = next((part for part in parts if part in names), None)
+        part = next((part for part in parts if zip_entry(data, part) is not None), None)
         if part is None:
             continue
         found = content_type(data, part)
@@ -338,17 +340,14 @@ def office_kind(data: bytes, names: set[str], claimed: str) -> Kind | None:
 
 
 def zip_kind(data: bytes, claimed: str) -> Kind:
-    entries = zip_entries(data)
-    office = office_kind(data, {entry.name for entry in entries}, claimed)
+    office = office_kind(data, claimed)
     if office is not None:
         return office
-    for entry in entries:
-        if entry.name == "mimetype":
-            content = zip_read(data, entry)
-            if content in ODF_TYPES:
-                group, kind = ODF_TYPES[content]
-                return Kind(group, kind, kind)
-            break
+    entry = zip_entry(data, "mimetype")
+    content = None if entry is None else zip_read(data, entry)
+    if content in ODF_TYPES:
+        group, kind = ODF_TYPES[content]
+        return Kind(group, kind, kind)
     if kept_ext(claimed):
         return Kind("other", claimed, claimed)
     return Kind("archives", "zip", "zip")
@@ -403,10 +402,11 @@ def sniff(data: bytes, name: str, claimed: str) -> Kind:
     if data.startswith(b"Rar!\x1a\x07"):
         return Kind("archives", "rar", "rar")
     text = decoded(data)
-    if text is None:
-        text = legacy_text(data, claimed)
     if text is not None:
         return text_kind(text, claimed)
+    if legacy(data, claimed):
+        ext = normalized(claimed)
+        return Kind(TEXT_GROUPS[ext], ext, ext)
     if transport_stream(data):
         return Kind("video", "ts", "ts")
     return other(claimed)

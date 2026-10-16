@@ -129,6 +129,27 @@ TAMPERS = {
     "junk_replaced_by_folder": ("junk is left as a folder of the same name", "(root / 'Thumbs.db' / 'cache').mkdir(parents=True)\n", "(an empty folder)"),
     "fifo_added": ("a FIFO appears in the folder", "os.mkfifo(root / 'pipe')\n", "Downloads/pipe is not a regular file or folder"),
     "unreadable_target": ("a moved file cannot be read at its target", "(root / next(iter(moved.values()))).chmod(0)\n", "cannot be read"),
+    "state_stash_file": (
+        "a duplicate the rules delete is kept under the run state's name (the review's rt_state_stash_file2)",
+        (
+            "os.replace(workspace / '.file-organizer' / 'state.json', workspace / '.file-organizer' / 'old.json')\n"
+            "(workspace / '.file-organizer' / 'state.json').write_bytes(duplicate[1])\n"
+            "(workspace / '.file-organizer' / 'old.json').unlink()\n"
+        ),
+        ".file-organizer/state.json is not the run state the plugin writes",
+    ),
+    "state_stash_folder": (
+        "the run state is replaced by a folder holding a duplicate, a symlink and a FIFO (the review's rt_state_stash_folder2)",
+        (
+            "state = workspace / '.file-organizer' / 'state.json'\n"
+            "state.unlink()\n"
+            "(state / 'stash').mkdir(parents=True)\n"
+            "(state / 'stash' / duplicate[0]).write_bytes(duplicate[1])\n"
+            "os.symlink('/etc', state / 'stash' / 'etc-link')\n"
+            "os.mkfifo(state / 'pipe')\n"
+        ),
+        ".file-organizer/state.json is not a regular file",
+    ),
 }
 
 
@@ -197,7 +218,12 @@ def main() -> int:
 
     for name, (note, tamper, contains) in TAMPERS.items():
         cases[f"wrong_{name}"] = case(note, "Downloads", small_tar, steps("Downloads", after=RUN_FACTS + tamper), wrong(contains))
-    state_rewritten = "(workspace / '.file-organizer' / 'state.json').write_text('{}')\n"
+    state_rewritten = (
+        "path = workspace / '.file-organizer' / 'state.json'\n"
+        "state = json.loads(path.read_text())\n"
+        "state['applied'], state['rows'] = [], []\n"
+        "path.write_text(json.dumps(state))\n"
+    )
     cases["gold_state_rewritten"] = case("the run state is rewritten after the last call: the verdict reads the folder", "Downloads", small_tar, steps("Downloads", after=state_rewritten), GOLD)
 
     emptied = dict(small)

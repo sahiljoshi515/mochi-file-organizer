@@ -43,6 +43,7 @@ def ordered(facts: list[Facts]) -> list[Facts]:
 def plan(facts: list[Facts], taken: list[str]) -> list[Step]:
     """Every file's step, in order. `taken` is every path that exists in the folder when the run starts."""
     claimed = {path_key(path) for path in taken}
+    tried: dict[str, int] = {}  # per base: the number its first free name had last time (every lower one is taken)
     kept: dict[str, int] = {}
     steps: list[Step] = []
     pending = 0
@@ -58,7 +59,7 @@ def plan(facts: list[Facts], taken: list[str]) -> list[Step]:
             action, reason, copy_of, target = STAY, IN_PLACE, None, fact.path
         else:
             kept[fact.sha256] = index
-            target = first_free(fact.base, fact.ext, claimed)
+            target = first_free(fact.base, fact.ext, claimed, tried)
             claimed.add(path_key(target))
             action, reason, copy_of = MOVE, RULES, None
         in_quota = action != STAY and pending < QUOTA
@@ -68,10 +69,15 @@ def plan(facts: list[Facts], taken: list[str]) -> list[Step]:
     return steps
 
 
-def first_free(base: str, ext: str, claimed: set[str]) -> str:
-    number = 1
+def first_free(base: str, ext: str, claimed: set[str], tried: dict[str, int] | None = None) -> str:
+    """The first of `base`, `base_2`, … not claimed. `tried` remembers where each base's search ended,
+    so files sharing a base cost time in proportion to their number, not its square."""
+    key = path_key(base)
+    number = 1 if tried is None else tried.get(key, 1)
     while path_key(suffixed(base, ext, number)) in claimed:
         number += 1
+    if tried is not None:
+        tried[key] = number
     return suffixed(base, ext, number)
 
 

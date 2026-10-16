@@ -178,6 +178,8 @@ def scan(workspace: Path, root: Path) -> Scan:
                     problems.append(f"{path} is not a folder, but the plugin keeps its run state there")
                 continue
             if place == STATE and at == STATE_DIR + "/" and entry.name == STATE_FILE:
+                if kind != "file":
+                    problems.append(f"{path} is not a regular file, but the plugin keeps its run state there")
                 continue
             total += size
             if place == OUTSIDE and path == prefix:

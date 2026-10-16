@@ -119,7 +119,7 @@ class PinnedFile(Output):
     group: Annotated[str, "documents, images, audio, video, spreadsheets, presentations, data, code, archives or other"]
     ext: Annotated[str, "The extension the rules give it"]
     date_source: Annotated[DateSource, "Where its date came from"]
-    date_raw: Annotated[str | None, "The date value as stored, or the name it came from; null when undated"]
+    date_raw: Annotated[str | None, "The embedded date value as stored (at most 64 characters), or the name it came from; null when undated"]
     date: Annotated[str | None, "YYYY-MM-DD, or null when undated"]
     slug: Annotated[str, "Its slug"]
     base: Annotated[str | None, "Its base path; null for junk and empty files"]

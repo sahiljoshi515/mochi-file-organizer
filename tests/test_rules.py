@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import random
+import time
 import zlib
 from pathlib import Path
 
@@ -233,11 +235,30 @@ def test_the_inflater_matches_zlib(level: int) -> None:
     rng = random.Random(level)
     for size in (0, 1, 7, 300, 5000, 70000):
         for data in (bytes(rng.randrange(256) for _ in range(size)), (b"<w:t>lorem ipsum</w:t>" * (size // 20 + 1))[:size]):
-            packer = zlib.compressobj(level, zlib.DEFLATED, -15)
-            assert inflate.inflate(packer.compress(data) + packer.flush(), 1 << 20) == data
+            for strategy in (zlib.Z_DEFAULT_STRATEGY, zlib.Z_FIXED, zlib.Z_HUFFMAN_ONLY, zlib.Z_RLE):
+                packer = zlib.compressobj(level, zlib.DEFLATED, -15, 8, strategy)
+                packed = packer.compress(data) + packer.flush()
+                assert inflate.inflate(packed, 1 << 20, 1 << 20) == data
+                assert inflate.inflate(packed, 4096, 1 << 20) == data[:4096]  # the start, as far as the limit
 
 
-def test_the_inflater_refuses_bad_streams_and_bombs() -> None:
-    assert inflate.inflate(b"\xff\xff\xff", 100) is None
+def packed_bits(bits: list[int]) -> bytes:
+    """Bits packed as DEFLATE reads them: each byte's lowest bit first."""
+    return bytes(sum(bit << shift for shift, bit in enumerate(bits[at : at + 8])) for at in range(0, len(bits), 8))
+
+
+def test_the_inflater_refuses_bad_streams_and_bounds_its_work() -> None:
+    assert inflate.inflate(b"\xff\xff\xff", 100, 4) is None
     packer = zlib.compressobj(9, zlib.DEFLATED, -15)
-    assert inflate.inflate(packer.compress(b"\x00" * 2_000_000) + packer.flush(), 1 << 20) is None
+    bomb = packer.compress(b"\x00" * 2_000_000) + packer.flush()
+    assert inflate.inflate(bomb, 4096, 4) == b"\x00" * 4096  # a bomb: only its first 4,096 bytes
+    empty_blocks = packed_bits(([0, 1, 0] + [0] * 7) * 100_000 + [1, 1, 0] + [0] * 7)  # fixed blocks that end at once
+    started = time.perf_counter()
+    assert inflate.inflate(empty_blocks, 4096, 4) == b""  # only the first 4 blocks are read
+    assert time.perf_counter() - started < 0.01
+    literal_heavy = zlib.compressobj(9, zlib.DEFLATED, -15)
+    text = base64.b64encode(random.Random(1).randbytes(600_000))
+    packed = literal_heavy.compress(text) + literal_heavy.flush()
+    started = time.perf_counter()
+    assert inflate.inflate(packed, 4096, 4) == text[:4096]
+    assert time.perf_counter() - started < 0.05
