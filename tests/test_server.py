@@ -1,8 +1,7 @@
-"""The MCP server end to end over stdio: its tool schemas are the contract's, and a call works."""
+"""The MCP server over stdio, as NanoAgent speaks to it: schemas, a survey and an apply, an error."""
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -10,6 +9,7 @@ from pathlib import Path
 import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from messy import messy, unpack
 from slimconfig import output_schema
 
 from contract import TOOLS
@@ -17,33 +17,33 @@ from contract import TOOLS
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_the_server_offers_the_contract_and_answers_calls(tmp_path: Path) -> None:
-    params = StdioServerParameters(
-        command=sys.executable, args=["-m", "plugin"], cwd=str(ROOT), env={**os.environ, "NANOAGENT_WORKSPACE": str(tmp_path)}
-    )
+async def talk(workspace: Path, script):
+    params = StdioServerParameters(command=sys.executable, args=["-m", "plugin"], cwd=str(ROOT), env={**os.environ, "NANOAGENT_WORKSPACE": str(workspace)})
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        return await script(session)
 
-    async def run() -> None:
-        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-            await session.initialize()
-            offered = {tool.name: tool for tool in (await session.list_tools()).tools}
-            assert set(offered) == {tool.value for tool in TOOLS}
-            for tool, (given, made) in TOOLS.items():
-                assert offered[tool.value].inputSchema == output_schema(given)
-                assert offered[tool.value].outputSchema == output_schema(made)
-            result = await session.call_tool("unpack_inbox", {"seed": 5, "size": "small"})
-            assert not result.isError
-            payload = result.structuredContent or json.loads(result.content[0].text)
-            assert payload["root"] == "file-organizer/5-small" and payload["files"] == 45 and "## 1. Delete" in payload["rules"]
-            assert payload["inventory"]["total"] == 45 and payload["inventory"]["next"] is None and len(payload["inventory"]["files"]) == 45
-            page = await session.call_tool("inventory", {"root": "file-organizer/5-small", "offset": 0, "limit": 100})
-            assert not page.isError
-            rows = (page.structuredContent or json.loads(page.content[0].text))["files"]
-            assert rows == payload["inventory"]["files"]
-            assert len(rows) == 45 and all(len(row["sha256"]) == 64 for row in rows)
-            assert [row["i"] for row in rows] == list(range(45))
-            failure = await session.call_tool("inventory", {"root": "file-organizer/9-small", "offset": 0, "limit": 100})
-            assert failure.isError and "unpack_inbox" in failure.content[0].text
-            rules = await session.call_tool("read_rules", {})
-            assert not rules.isError
 
-    anyio.run(run)
+def test_the_server_offers_the_contract_and_runs_a_folder(tmp_path: Path) -> None:
+    unpack(messy(1, "small", "Downloads"), tmp_path)
+
+    async def script(session):
+        offered = {tool.name: tool for tool in (await session.list_tools()).tools}
+        assert set(offered) == {tool.value for tool in TOOLS}
+        for tool, (given, made) in TOOLS.items():
+            assert offered[tool.value].inputSchema == output_schema(given)
+            assert offered[tool.value].outputSchema == output_schema(made)
+        early = await session.call_tool("apply", {"folder": "Downloads", "moves": [], "deletes": []})
+        assert early.isError and "call survey" in early.content[0].text
+        survey = await session.call_tool("survey", {"folder": "Downloads"})
+        assert not survey.isError
+        rows = survey.structuredContent["rows"]
+        assert rows and all(set(row) == {"i", "path", "h", "base", "drop"} for row in rows)
+        junk = next(row for row in rows if row["drop"])
+        applied = await session.call_tool("apply", {"folder": "Downloads", "moves": [], "deletes": [junk["i"]]})
+        assert not applied.isError and applied.structuredContent["applied"] == 1
+        missing = await session.call_tool("pin_layout", {"folder": "Nope"})
+        assert missing.isError and "No folder Nope" in missing.content[0].text
+        assert str(tmp_path) not in survey.content[0].text  # no workspace paths in outputs
+
+    anyio.run(talk, tmp_path, script)

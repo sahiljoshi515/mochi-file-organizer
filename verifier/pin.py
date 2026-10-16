@@ -1,127 +1,104 @@
-"""pin_inventory (the organize reference) and the organize task's outcome check."""
+"""pin_layout, the organize-folder task's answer key: the folder is one the task may name, and the pin is
+exactly the rules applied to the agent folder copy it was taken from."""
 
-from .checks import is_sha256, result, root_problem, seed_problem, task_root
-from .rules import COUNTS, INBOX, ORGANIZED, files_under, inventory_rows, plan, root_name, sha256_of, target_problem
+from pathlib import Path
 
-# How many entries each list of problems shows; the counts are always whole.
-SHOWN = 100
+from .checks import result
+from .layout import folder_problem, look
+from .naming import base_path, conforms
+from .plan import ordered, plan
+from .walk import Facts
+
+FACT_FIELDS = ("path", "size", "sha256", "junk", "group", "type", "ext", "date_source", "date_raw", "date", "slug", "base", "conforming")
+STEP_FIELDS = ("action", "reason", "copy_of", "target", "quota")
 
 
 def verify_input(value):
-    problem = seed_problem(value)
+    problem = folder_problem(value.folder)
     if problem:
         return result(False, problem)
     return result(True, "input is valid")
 
 
+def pinned_row(file):
+    """A PinnedFile as plain values, in FACT_FIELDS then STEP_FIELDS order."""
+    return (
+        file.path, file.size, file.sha256, file.junk, file.group, file.type, file.ext, file.date_source.value,
+        file.date_raw, file.date, file.slug, file.base, file.conforming,
+        file.action.value, file.reason.value, file.copy_of, file.target, file.quota,
+    )  # fmt: skip
+
+
+def derived_row(fact, step):
+    return (
+        fact.path, fact.size, fact.sha256, fact.junk, fact.group, fact.type, fact.ext, fact.date_source,
+        fact.date_raw, fact.date, fact.slug, fact.base, fact.conforming,
+        step.action, step.reason, step.copy_of, step.target, step.quota,
+    )  # fmt: skip
+
+
+def first_difference(pinned, derived):
+    """'file i: field pinned X, the rules give Y' for the first difference, or None."""
+    if len(pinned) != len(derived):
+        return f"the pin lists {len(pinned)} files, the rules see {len(derived)}"
+    for index, (left, right) in enumerate(zip(pinned, derived, strict=True)):
+        for name, one, other in zip(FACT_FIELDS + STEP_FIELDS, left, right, strict=True):
+            if one != other:
+                return f"file {index} ({right[0]}): {name} pinned {one!r}, the rules give {other!r}"
+    return None
+
+
 def verify_output(input_value, output_value, workspace):
-    """The pin must be exactly the rules applied to the folder the tool made in this workspace."""
-    expected_root = root_name(input_value.seed, input_value.size.value)
-    if output_value.seed != input_value.seed or output_value.size != input_value.size or output_value.root != expected_root:
+    """Re-derive the whole answer key from the scratch copy the reference read, and require it exactly."""
+    if output_value.folder != input_value.folder:
         return result(False, "the pin is for another folder")
-    if root_problem(output_value.root):
-        return result(False, "the pin's root is not a task root")
-    root = task_root(workspace, input_value)
-    if not (root / INBOX).is_dir():
-        return result(False, f"{expected_root}/{INBOX} was not made")
-    rows = inventory_rows(root)
-    wanted = COUNTS[input_value.size.value]
-    if len(rows) != wanted or output_value.files != wanted:
-        return result(False, f"a {input_value.size.value} folder holds {wanted} files, not {len(rows)} (pinned {output_value.files})")
-    pinned = [(row.sha256, row.path) for row in output_value.expected]
-    if any(not is_sha256(digest) or target_problem(path) for digest, path in pinned):
-        return result(False, "a pinned entry is not a sha256 at a path the rules could give")
-    if len({digest for digest, _path in pinned}) != len(pinned) or len({path for _digest, path in pinned}) != len(pinned):
-        return result(False, "the pin lists a hash or a path twice")
-    planned = plan(rows)
-    if pinned != list(planned.expected):
-        return result(False, "the pinned layout differs from the rules applied to the folder")
-    counts = (output_value.unique, output_value.duplicates, output_value.removed)
-    if counts != (planned.unique, planned.duplicates, planned.removed):
+    found = look(Path(workspace), input_value.folder)
+    if found.refused:
+        return result(False, f"the rules refuse this folder, yet a pin was made: {found.refused}")
+    if [file.i for file in output_value.files] != list(range(len(output_value.files))):
+        return result(False, "the pinned files are not numbered 0, 1, 2, … in order")
+    problem = first_difference([pinned_row(file) for file in output_value.files], [derived_row(fact, step) for fact, step in zip(found.facts, found.steps, strict=True)])
+    if problem:
+        return result(False, f"the pin differs from the rules applied to the folder: {problem}")
+    stays = sum(step.action == "stay" for step in found.steps)
+    quota = sum(step.quota for step in found.steps)
+    if output_value.taken != found.taken:
+        return result(False, "the pinned taken paths differ from the folder's")
+    if (output_value.pending, output_value.quota) != (len(found.steps) - stays, quota):
         return result(False, "the pinned counts differ from the rules applied to the folder")
-    return result(
-        True,
-        f"{planned.unique} files pinned",
-        files=wanted,
-        unique=planned.unique,
-        duplicates=planned.duplicates,
-        removed=planned.removed,
-    )
+    if output_value.entries_after != found.entries_after:
+        return result(False, f"the pin projects {output_value.entries_after} entries after the run, the rules {found.entries_after}")
+    return result(True, f"{len(found.steps)} files pinned: {stays} in place, {quota} actions this run", files=len(found.steps))
 
 
-def _label(count, one, many=None):
-    return f"{count} {one if count == 1 else (many or one + 's')}"
-
-
-def verify_task(arguments, reference, workspace):
-    """Approve the folder only when every pinned file sits at its pinned path, once, and nothing else
-    is left anywhere; score it by the share of pinned files in place."""
-    summary = {
-        "files": reference.files,
-        "unique": reference.unique,
-        "duplicates": reference.duplicates,
-        "removed": reference.removed,
-    }
-    if reference.seed != arguments.seed or reference.size != arguments.size:
-        return result(False, "the pinned inventory is for another folder", score=0.0, **summary)
-    root = task_root(workspace, arguments)
-    if not root.is_dir():
-        return result(False, "the folder was never unpacked", score=0.0, **summary)
-
-    expected = {row.sha256: row.path for row in reference.expected}
-    organized = {}
-    leftovers = []
-    for path in files_under(root):
-        relative = path.relative_to(root).as_posix()
-        if relative.startswith(ORGANIZED + "/"):
-            organized[relative] = sha256_of(path)
-        else:
-            leftovers.append(relative)
-    leftovers += sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_symlink())
-    by_hash = {}
-    for relative, digest in sorted(organized.items()):
-        by_hash.setdefault(digest, []).append(relative)
-
-    placed = 0
-    missing, misplaced, duplicates_kept = [], [], []
-    for digest, wanted in sorted(expected.items(), key=lambda pair: pair[1]):
-        paths = by_hash.get(digest, [])
-        if not paths:
-            missing.append({"sha256": digest, "expected": wanted})
-        elif wanted in paths:
-            placed += 1
-            if len(paths) > 1:
-                duplicates_kept.append({"sha256": digest, "expected": wanted, "extra": [path for path in paths if path != wanted]})
-        else:
-            misplaced.append({"sha256": digest, "expected": wanted, "actual": paths})
-    extra = sorted(path for digest, paths in by_hash.items() if digest not in expected for path in paths)
-    bad_names = [{"path": path, "problem": target_problem(path)} for path in sorted(organized) if target_problem(path)]
-
-    unique = len(expected)
-    score = placed / unique if unique else float(not organized and not leftovers)
-    problems = []
-    if missing:
-        problems.append(f"{_label(len(missing), 'file')} missing")
-    if misplaced:
-        problems.append(f"{_label(len(misplaced), 'file')} misplaced")
-    if duplicates_kept:
-        problems.append(f"{_label(len(duplicates_kept), 'duplicate')} kept")
-    if extra:
-        problems.append(f"{_label(len(extra), 'other file')} in {ORGANIZED}/")
-    if leftovers:
-        problems.append(f"{_label(len(leftovers), 'file')} left outside {ORGANIZED}/")
-    if bad_names:
-        problems.append(f"{_label(len(bad_names), 'path')} not named by the rules")
-    details = {
-        **summary,
-        "placed": placed,
-        "missing": missing[:SHOWN],
-        "misplaced": misplaced[:SHOWN],
-        "duplicates_kept": duplicates_kept[:SHOWN],
-        "extra": extra[:SHOWN],
-        "leftovers": leftovers[:SHOWN],
-        "bad_names": bad_names[:SHOWN],
-    }
-    if problems:
-        return result(False, f"{placed} of {unique} files in place: " + ", ".join(problems), score=score, **details)
-    return result(True, f"all {unique} files are in place and nothing else remains", score=score, **details)
+def rederive(reference):
+    """Why the pinned plan is not the rules applied to the pinned facts, or None (the answer-key check)."""
+    facts = []
+    for file in reference.files:
+        facts.append(
+            Facts(
+                path=file.path, size=file.size, sha256=file.sha256, junk=file.junk, group=file.group, type=file.type,
+                ext=file.ext, date_source=file.date_source.value, date_raw=file.date_raw, date=file.date, slug=file.slug,
+                base=file.base, conforming=file.conforming,
+            )
+        )
+        if file.junk or file.size == 0:
+            if file.base is not None:
+                return f"{file.path} is junk or empty yet has a base path"
+            continue
+        if file.base != base_path(file.group, file.type, file.ext, file.date, file.slug):
+            return f"{file.path}: its base path is not the one its facts give"
+        if file.conforming != conforms(file.path, file.base, file.ext):
+            return f"{file.path}: conforming is {file.conforming}, its path and base say otherwise"
+    if [fact.path for fact in ordered(facts)] != [fact.path for fact in facts]:
+        return "the pinned files are not in the rules' order"
+    steps = plan(facts, reference.taken)
+    for file, step in zip(reference.files, steps, strict=True):
+        if (file.i, file.action.value, file.reason.value, file.copy_of, file.target, file.quota) != (
+            step.i, step.action, step.reason, step.copy_of, step.target, step.quota,
+        ):  # fmt: skip
+            return f"{file.path}: the pinned step is not the rules' step"
+    stays = sum(step.action == "stay" for step in steps)
+    if (reference.pending, reference.quota) != (len(steps) - stays, sum(step.quota for step in steps)):
+        return "the pinned counts are not the plan's"
+    return None

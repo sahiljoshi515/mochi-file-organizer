@@ -1,0 +1,537 @@
+{
+ "note": "Real files for the corpus tests, downloaded at test time into tests/corpus/corpus-cache/ (git-ignored) and never committed: each keeps its own licence. fetch.py checks every sha256. expect is what RULES.md gives each file, checked by hand once and by the independent oracle on every run.",
+ "files": [
+  {
+   "name": "flower.jpg",
+   "url": "https://raw.githubusercontent.com/python-pillow/Pillow/main/Tests/images/flower.jpg",
+   "sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+   "bytes": 32764,
+   "source": "Pillow test images",
+   "licence": "MIT-CMU (the Pillow licence)",
+   "expect": {
+    "group": "images",
+    "type": "jpg",
+    "ext": "jpg",
+    "date": "2003-12-14"
+   }
+  },
+  {
+   "name": "exif_gps.jpg",
+   "url": "https://raw.githubusercontent.com/python-pillow/Pillow/main/Tests/images/exif_gps.jpg",
+   "sha256": "360eb3ce66533146584aa66576130c5ab98c763b7c7f51898892e7eaa7dcab49",
+   "bytes": 1097,
+   "source": "Pillow test images",
+   "licence": "MIT-CMU (the Pillow licence)",
+   "expect": {
+    "group": "images",
+    "type": "jpg",
+    "ext": "jpg",
+    "date": "2099-09-29"
+   }
+  },
+  {
+   "name": "flower.webp",
+   "url": "https://raw.githubusercontent.com/python-pillow/Pillow/main/Tests/images/flower.webp",
+   "sha256": "af5bf1a0e420467c09d221fbfbb739646956c17f2b67f8280eacfacf87059a37",
+   "bytes": 29556,
+   "source": "Pillow test images",
+   "licence": "MIT-CMU (the Pillow licence)",
+   "expect": {
+    "group": "images",
+    "type": "webp",
+    "ext": "webp",
+    "date": "2003-12-14"
+   }
+  },
+  {
+   "name": "exif.png",
+   "url": "https://raw.githubusercontent.com/python-pillow/Pillow/main/Tests/images/exif.png",
+   "sha256": "eb58fc260f08b8c95857128316f72ec8008ca8b2d3901aa23eba7196ae716258",
+   "bytes": 179336,
+   "source": "Pillow test images",
+   "licence": "MIT-CMU (the Pillow licence)",
+   "expect": {
+    "group": "images",
+    "type": "png",
+    "ext": "png",
+    "date": null
+   }
+  },
+  {
+   "name": "hopper.gif",
+   "url": "https://raw.githubusercontent.com/python-pillow/Pillow/main/Tests/images/hopper.gif",
+   "sha256": "19b8e092eee2eab632a36ee5644e362cb751cecaadb40bf4615334f3ffc6f1a5",
+   "bytes": 15305,
+   "source": "Pillow test images",
+   "licence": "MIT-CMU (the Pillow licence)",
+   "expect": {
+    "group": "images",
+    "type": "gif",
+    "ext": "gif",
+    "date": null
+   }
+  },
+  {
+   "name": "hopper.tif",
+   "url": "https://raw.githubusercontent.com/python-pillow/Pillow/main/Tests/images/hopper.tif",
+   "sha256": "eec7740ad708ec31de3f64e9106de1123508d801ee96056eed30b0900d5ee1e1",
+   "bytes": 49597,
+   "source": "Pillow test images",
+   "licence": "MIT-CMU (the Pillow licence)",
+   "expect": {
+    "group": "images",
+    "type": "tiff",
+    "ext": "tiff",
+    "date": null
+   }
+  },
+  {
+   "name": "exif.avif",
+   "url": "https://raw.githubusercontent.com/python-pillow/Pillow/main/Tests/images/avif/exif.avif",
+   "sha256": "438dc63eb5aa722f4b23a93ac48cd0c19b7a575865c89e666c86b7ac363cff04",
+   "bytes": 16078,
+   "source": "Pillow test images",
+   "licence": "MIT-CMU (the Pillow licence)",
+   "expect": {
+    "group": "images",
+    "type": "avif",
+    "ext": "avif",
+    "date": null
+   }
+  },
+  {
+   "name": "zPug_3.heic",
+   "url": "https://raw.githubusercontent.com/bigcat88/pillow_heif/master/tests/images/heif/zPug_3.heic",
+   "sha256": "daf1515c651e15968ad6ec142e443759156fee76c65715e4f5713cf1ad072774",
+   "bytes": 22074,
+   "source": "pillow-heif test images",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "images",
+    "type": "heic",
+    "ext": "heic",
+    "date": null
+   }
+  },
+  {
+   "name": "RGB_8__128x128.heif",
+   "url": "https://raw.githubusercontent.com/bigcat88/pillow_heif/master/tests/images/heif/RGB_8__128x128.heif",
+   "sha256": "b1f3c0578b52525e95d1db617286879aee76779eb2e507fc57d3ce2a3ab527f9",
+   "bytes": 6647,
+   "source": "pillow-heif test images",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "images",
+    "type": "heic",
+    "ext": "heic",
+    "date": null
+   }
+  },
+  {
+   "name": "L_xmp.heif",
+   "url": "https://raw.githubusercontent.com/bigcat88/pillow_heif/master/tests/images/heif/L_xmp.heif",
+   "sha256": "51d26b47fbfdf31fe1819c8b5eff3fd35e8436f737a367d3cc51ae5ca95d7ab1",
+   "bytes": 15881,
+   "source": "pillow-heif test images",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "images",
+    "type": "heic",
+    "ext": "heic",
+    "date": null
+   }
+  },
+  {
+   "name": "SampleDoc.docx",
+   "url": "https://raw.githubusercontent.com/apache/poi/trunk/test-data/document/SampleDoc.docx",
+   "sha256": "ea2c517bd7be4628887eb97f630334b93b894f4522d2c0adae263e602d76df92",
+   "bytes": 11611,
+   "source": "Apache POI test data",
+   "licence": "Apache-2.0",
+   "expect": {
+    "group": "documents",
+    "type": "docx",
+    "ext": "docx",
+    "date": "2008-01-04"
+   }
+  },
+  {
+   "name": "SampleSS.xlsx",
+   "url": "https://raw.githubusercontent.com/apache/poi/trunk/test-data/spreadsheet/SampleSS.xlsx",
+   "sha256": "44f1b6ef310c370d4902ee3452e6174da25a67bdb09f47850d51b3287cb3db71",
+   "bytes": 9112,
+   "source": "Apache POI test data",
+   "licence": "Apache-2.0",
+   "expect": {
+    "group": "spreadsheets",
+    "type": "xlsx",
+    "ext": "xlsx",
+    "date": "2008-01-04"
+   }
+  },
+  {
+   "name": "SampleShow.pptx",
+   "url": "https://raw.githubusercontent.com/apache/poi/trunk/test-data/slideshow/SampleShow.pptx",
+   "sha256": "bfb4b2f07c9233afd2f32aa5781d849d0c7d225bf03721a10becf487b481d828",
+   "bytes": 39083,
+   "source": "Apache POI test data",
+   "licence": "Apache-2.0",
+   "expect": {
+    "group": "presentations",
+    "type": "pptx",
+    "ext": "pptx",
+    "date": "2008-01-04"
+   }
+  },
+  {
+   "name": "WordTest_edit.odt",
+   "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/odfexport/data/WordTest_edit.odt",
+   "sha256": "a4dbdaa3c751d177a298ba2d0b9dac290c57104c115a6cef42a4c701d36be3e0",
+   "bytes": 6496,
+   "source": "LibreOffice QA documents",
+   "licence": "MPL-2.0",
+   "expect": {
+    "group": "documents",
+    "type": "odt",
+    "ext": "odt",
+    "date": "2023-02-16"
+   }
+  },
+  {
+   "name": "tdf76310.ods",
+   "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sc/qa/unit/data/ods/tdf76310.ods",
+   "sha256": "c83255e2dcff4ce7af02d3cbdd18148aeae7f16b10ddf3911c74791075e2c7a4",
+   "bytes": 1994,
+   "source": "LibreOffice QA documents",
+   "licence": "MPL-2.0",
+   "expect": {
+    "group": "spreadsheets",
+    "type": "ods",
+    "ext": "ods",
+    "date": "2014-03-19"
+   }
+  },
+  {
+   "name": "16-9.odp",
+   "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sd/qa/unit/data/odp/16-9.odp",
+   "sha256": "a6851686ee63dee52b32fef9ff8819e48bca65034334a8bc0caa2e2d4352690f",
+   "bytes": 9360,
+   "source": "LibreOffice QA documents",
+   "licence": "MPL-2.0",
+   "expect": {
+    "group": "presentations",
+    "type": "odp",
+    "ext": "odp",
+    "date": "2026-05-21"
+   }
+  },
+  {
+   "name": "movie_5.mp4",
+   "url": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/media/movie_5.mp4",
+   "sha256": "e2e2bd5b7641b88406a8db15410dc1ed55d89547cb29bd133491e4f90229e1e1",
+   "bytes": 31603,
+   "source": "web-platform-tests media",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "video",
+    "type": "mp4",
+    "ext": "mp4",
+    "date": "2010-06-01"
+   }
+  },
+  {
+   "name": "test-1s.mp4",
+   "url": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/media/test-1s.mp4",
+   "sha256": "dc72b1b5591bbc9e2d0d6b511fa6d5134dd78dca6cf357244d656225f62a94b5",
+   "bytes": 13932,
+   "source": "web-platform-tests media",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "video",
+    "type": "mp4",
+    "ext": "mp4",
+    "date": null
+   }
+  },
+  {
+   "name": "A4.mp4",
+   "url": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/media/A4.mp4",
+   "sha256": "d1292c9ce2fc379a524a7604ac54f1bd00dec0c4a82cca52b5a028e6038b4315",
+   "bytes": 53409,
+   "source": "web-platform-tests media",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "video",
+    "type": "mp4",
+    "ext": "mp4",
+    "date": "2010-11-17"
+   }
+  },
+  {
+   "name": "white.webm",
+   "url": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/media/white.webm",
+   "sha256": "e85249085c720836de0ca8d1ae5881529cc37449c0d290473edf2d0b14c199ee",
+   "bytes": 10880,
+   "source": "web-platform-tests media",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "video",
+    "type": "webm",
+    "ext": "webm",
+    "date": null
+   }
+  },
+  {
+   "name": "sound_5.mp3",
+   "url": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/media/sound_5.mp3",
+   "sha256": "89a84d0b19a10c7fa7e898075bf1a3da737df8c0a68b3e5f82259bec8c988085",
+   "bytes": 23442,
+   "source": "web-platform-tests media",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "audio",
+    "type": "mp3",
+    "ext": "mp3",
+    "date": null
+   }
+  },
+  {
+   "name": "sound_5.oga",
+   "url": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/media/sound_5.oga",
+   "sha256": "7c3769340ac653a679eb7f48bd725d7f70217537a2816af023f2f8b0223bfcc7",
+   "bytes": 18541,
+   "source": "web-platform-tests media",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "audio",
+    "type": "ogg",
+    "ext": "ogg",
+    "date": null
+   }
+  },
+  {
+   "name": "speech.wav",
+   "url": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/media/speech.wav",
+   "sha256": "781f9ab2557797f929bc8782bd2ffb4de8a0af8a6b3fea853faaa88c2299c100",
+   "bytes": 95310,
+   "source": "web-platform-tests media",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "audio",
+    "type": "wav",
+    "ext": "wav",
+    "date": null
+   }
+  },
+  {
+   "name": "green.svg",
+   "url": "https://raw.githubusercontent.com/web-platform-tests/wpt/master/images/green.svg",
+   "sha256": "d142a20357616acd430fd3403a802bf4ab7f361be856516106cb6d57b5c220b1",
+   "bytes": 118,
+   "source": "web-platform-tests media",
+   "licence": "BSD-3-Clause",
+   "expect": {
+    "group": "images",
+    "type": "svg",
+    "ext": "svg",
+    "date": null
+   }
+  },
+  {
+   "name": "pg11.txt",
+   "url": "https://www.gutenberg.org/cache/epub/11/pg11.txt",
+   "sha256": "01b38ea4c710a84bc18d0bd41271a5a1a92b94e97b2812f4dece97d4a694725e",
+   "bytes": 174311,
+   "source": "Project Gutenberg eBook #11, Alice's Adventures in Wonderland",
+   "licence": "Public domain in the USA (Project Gutenberg License)",
+   "expect": {
+    "group": "documents",
+    "type": "txt",
+    "ext": "txt",
+    "date": null
+   }
+  },
+  {
+   "name": "pg11-images.html",
+   "url": "https://www.gutenberg.org/cache/epub/11/pg11-images.html",
+   "sha256": "7df9c19e9fccac5b3ae9b1f837b247db1c1da93845dfb9e1903dce85013c43d3",
+   "bytes": 192539,
+   "source": "Project Gutenberg eBook #11, Alice's Adventures in Wonderland",
+   "licence": "Public domain in the USA (Project Gutenberg License)",
+   "expect": {
+    "group": "documents",
+    "type": "html",
+    "ext": "html",
+    "date": null
+   }
+  },
+  {
+   "name": "pg11-images-3.epub",
+   "url": "https://www.gutenberg.org/cache/epub/11/pg11-images-3.epub",
+   "sha256": "4f81245d31380ac1d6eafb9a321e3691369bc70985736ae4bccf849a4f784036",
+   "bytes": 189249,
+   "source": "Project Gutenberg eBook #11, Alice's Adventures in Wonderland",
+   "licence": "Public domain in the USA (Project Gutenberg License)",
+   "expect": {
+    "group": "documents",
+    "type": "epub",
+    "ext": "epub",
+    "date": null
+   }
+  },
+  {
+   "name": "tracemonkey.pdf",
+   "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/tracemonkey.pdf",
+   "sha256": "3662ff519e485810520552bf301d8c3b2b917fd2f83303f4965d7abed367e113",
+   "bytes": 1016315,
+   "source": "pdf.js test corpus",
+   "licence": "Apache-2.0 (repository); the document's own rights apply",
+   "expect": {
+    "group": "documents",
+    "type": "pdf",
+    "ext": "pdf",
+    "date": "2009-04-01"
+   }
+  },
+  {
+   "name": "alphatrans.pdf",
+   "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/alphatrans.pdf",
+   "sha256": "234c0ab8e9458f4d17133b08d2b66170eeb92be2a80e1508aa5117a2bf568f63",
+   "bytes": 16910,
+   "source": "pdf.js test corpus",
+   "licence": "Apache-2.0 (repository); the document's own rights apply",
+   "expect": {
+    "group": "documents",
+    "type": "pdf",
+    "ext": "pdf",
+    "date": "2011-10-28"
+   }
+  },
+  {
+   "name": "fw4.pdf",
+   "url": "https://www.irs.gov/pub/irs-pdf/fw4.pdf",
+   "sha256": "92444d8856ce55d9e25dca8b6d1420634fc68b11e1ab1f760916ea29ddd312b2",
+   "bytes": 208845,
+   "source": "IRS Form W-4",
+   "licence": "US government work, public domain",
+   "expect": {
+    "group": "documents",
+    "type": "pdf",
+    "ext": "pdf",
+    "date": null
+   }
+  },
+  {
+   "name": "this.py",
+   "url": "https://raw.githubusercontent.com/python/cpython/main/Lib/this.py",
+   "sha256": "481d0cb3de511eae0b5713dad18542b07eafd9c013bb7690f7497bad49923a71",
+   "bytes": 1003,
+   "source": "CPython standard library",
+   "licence": "PSF-2.0",
+   "expect": {
+    "group": "code",
+    "type": "py",
+    "ext": "py",
+    "date": null
+   }
+  },
+  {
+   "name": "antigravity.py",
+   "url": "https://raw.githubusercontent.com/python/cpython/main/Lib/antigravity.py",
+   "sha256": "8a5ee63e1b79ba2733e7ff4290b6eefea60e7f3a1ccb6bb519535aaf92b44967",
+   "bytes": 500,
+   "source": "CPython standard library",
+   "licence": "PSF-2.0",
+   "expect": {
+    "group": "code",
+    "type": "py",
+    "ext": "py",
+    "date": null
+   }
+  },
+  {
+   "name": "language-codes.csv",
+   "url": "https://raw.githubusercontent.com/datasets/language-codes/main/data/language-codes.csv",
+   "sha256": "34e9dde2efbb37abd8c24d47a8693063579f706836fbe694557ecdbf1bfc53f2",
+   "bytes": 3242,
+   "source": "Data Packages: language codes",
+   "licence": "ODC-PDDL-1.0",
+   "expect": {
+    "group": "spreadsheets",
+    "type": "csv",
+    "ext": "csv",
+    "date": null
+   }
+  },
+  {
+   "name": "datapackage.json",
+   "url": "https://raw.githubusercontent.com/datasets/language-codes/main/datapackage.json",
+   "sha256": "0707a4c829726a26d43eb8b7b3d1dc3db58a9864a9102dcade6de746806fae0f",
+   "bytes": 6416,
+   "source": "Data Packages: language codes",
+   "licence": "ODC-PDDL-1.0",
+   "expect": {
+    "group": "data",
+    "type": "json",
+    "ext": "json",
+    "date": null
+   }
+  },
+  {
+   "name": "2013-12-09-jekyll-1-4-1-released.markdown",
+   "url": "https://raw.githubusercontent.com/jekyll/jekyll/master/docs/_posts/2013-12-09-jekyll-1-4-1-released.markdown",
+   "sha256": "7c5858415577d5291a60342516c6014bf77f4a1cfb584c757644a603a54362b1",
+   "bytes": 477,
+   "source": "Jekyll documentation posts",
+   "licence": "MIT",
+   "expect": {
+    "group": "documents",
+    "type": "md",
+    "ext": "md",
+    "date": "2013-12-09"
+   }
+  },
+  {
+   "name": "2016-05-18-jekyll-3-1-5-released.markdown",
+   "url": "https://raw.githubusercontent.com/jekyll/jekyll/master/docs/_posts/2016-05-18-jekyll-3-1-5-released.markdown",
+   "sha256": "f893c4f2c601f110682ab4bdb73130eeb3c3c6454f25edfce74cb6abd5b396bf",
+   "bytes": 455,
+   "source": "Jekyll documentation posts",
+   "licence": "MIT",
+   "expect": {
+    "group": "documents",
+    "type": "md",
+    "ext": "md",
+    "date": "2016-05-18"
+   }
+  },
+  {
+   "name": "six-1.16.0.tar.gz",
+   "url": "https://files.pythonhosted.org/packages/71/39/171f1c67cd00715f190ba0b100d606d440a28c93c7714febeca8b79af85e/six-1.16.0.tar.gz",
+   "sha256": "1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926",
+   "bytes": 34041,
+   "source": "six 1.16.0 from PyPI",
+   "licence": "MIT",
+   "expect": {
+    "group": "archives",
+    "type": "gz",
+    "ext": "tar.gz",
+    "date": null
+   }
+  },
+  {
+   "name": "six-1.16.0-py2.py3-none-any.whl",
+   "url": "https://files.pythonhosted.org/packages/d9/5a/e7c31adbe875f2abbb91bd84cf2dc52d792b5a01506781dbcf25c91daf11/six-1.16.0-py2.py3-none-any.whl",
+   "sha256": "8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254",
+   "bytes": 11053,
+   "source": "six 1.16.0 from PyPI",
+   "licence": "MIT",
+   "expect": {
+    "group": "other",
+    "type": "whl",
+    "ext": "whl",
+    "date": null
+   }
+  }
+ ]
+}

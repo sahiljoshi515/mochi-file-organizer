@@ -1,0 +1,17 @@
+/* Styles for this plugin's renderer (renderers.js), the organize-folder result, over the kit's
+   (kit/kit.css). They apply only inside the renderer's output, in its own shadow root, and use only the
+   kit's variables, so they follow the host's light and dark themes. */
+
+.fo-result { display: grid; gap: 10px; min-width: 0; }
+.fo-summary { display: flex; align-items: center; gap: 6px; font-weight: 600; overflow-wrap: anywhere; margin: 0; }
+.fo-summary .icon { color: var(--accent); flex: none; }
+.fo-counts { margin: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.fo-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.fo-check-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.fo-check { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; }
+.fo-check.ok .icon { color: var(--ok); }
+.fo-check.bad .icon { color: var(--bad); }
+.fo-check.skip .icon { color: var(--muted); }
+.fo-check .icon { flex: none; margin-top: 2px; }
+.fo-check-text { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.fo-check-why { color: var(--bad); }

@@ -1,370 +1,270 @@
+"""The verifier: tool checks, and the task check's 11 constraints, each broken on its own."""
+
 from __future__ import annotations
 
 import dataclasses
-import json
 import shutil
 from pathlib import Path
 
+import builders
 import pytest
-from slimconfig import build_output, plain_output
+from flow import agent, plain_rows
+from messy import messy, unpack
 
 import verifier
-from contract import TOOLS, InventoryInput, Move, OrganizeInput, PinOutput, PlanInput, Tool
-from plugin import rules
-from plugin.organizer import apply_plan, inventory, list_tree, pin_inventory, read_rules, unpack_inbox
+from contract import ApplyInput, Move, OrganizeInput, OrganizeOutput
+from plugin import organizer
 
-ARGUMENTS = {"seed": 1, "size": "small"}
-ROOT = "file-organizer/1-small"
+TASK = "organize-folder"
+FOLDER = "Downloads"
+
+
+@pytest.fixture(autouse=True)
+def fresh_run():
+    organizer.RUN = None
+    yield
+    organizer.RUN = None
+
+
+def run(tmp_path: Path, files: dict[str, bytes], folder: str = FOLDER, mistake: str | None = None):
+    """The task as the host runs it: the pin from a scratch copy, then survey and two applies."""
+    workspace, scratch = tmp_path / "workspace", tmp_path / "scratch"
+    unpack(files, workspace)
+    shutil.copytree(workspace, scratch)
+    reference = organizer.pin_layout(OrganizeInput(folder=folder), scratch)
+    assert verifier.verify_output("pin_layout", OrganizeInput(folder=folder), reference, str(scratch))["valid"]
+    survey = organizer.survey(OrganizeInput(folder=folder), workspace)
+    assert verifier.verify_output("survey", OrganizeInput(folder=folder), survey, str(workspace))["valid"]
+    outputs = {"survey": {"rows": plain_rows(survey)}}
+    agent().decide(outputs, folder, mistake)
+    last = survey.summary
+    for batch in (outputs["batch0"], outputs["batch1"]):
+        given = ApplyInput(folder=folder, moves=[Move(**move) for move in batch["moves"]], deletes=batch["deletes"])
+        applied = organizer.apply(given, workspace)
+        check = verifier.verify_output("apply", given, applied, str(workspace))
+        assert check["valid"], check["message"]
+        last = applied.summary
+    return workspace, reference, last
+
+
+def judge(workspace: Path, reference, output, folder: str = FOLDER) -> dict:
+    first = verifier.verify_task(TASK, OrganizeInput(folder=folder), output, reference, str(workspace))
+    assert first == verifier.verify_task(TASK, OrganizeInput(folder=folder), output, reference, str(workspace))  # deterministic
+    return first
+
+
+def failed(verdict: dict) -> list[str]:
+    return [entry["id"] for entry in verdict["details"]["constraints"] if entry["ok"] is False]
 
 
 @pytest.fixture
-def workspace(tmp_path: Path) -> Path:
-    folder = tmp_path / "workspace"
-    folder.mkdir()
-    unpack_inbox(build_output(ARGUMENTS, OrganizeInput), folder)
-    return folder
+def gold(tmp_path: Path):
+    return run(tmp_path, messy(1, "small", FOLDER))
 
 
-@pytest.fixture
-def reference(tmp_path: Path) -> dict:
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    return plain_output(pin_inventory(build_output(ARGUMENTS, OrganizeInput), scratch))
+def test_a_gold_run_holds_every_constraint(gold) -> None:
+    workspace, reference, output = gold
+    verdict = judge(workspace, reference, output)
+    assert verdict["valid"] and verdict["score"] == 1.0, verdict["message"]
+    assert [entry["id"] for entry in verdict["details"]["constraints"]] == [
+        "answer-key", "submitted-folder", "folder-present", "every-file-kept", "moved-to-rules-path", "duplicates-and-junk-removed",
+        "others-untouched", "nothing-extra", "organized-by-rules", "summary-matches", "saved-back",
+    ]  # fmt: skip
+    assert all(entry["ok"] is True for entry in verdict["details"]["constraints"])
+    assert verdict["message"].startswith("Organized Downloads: moved ")
+    assert len(verdict["details"]["rows"]) == reference.quota and all(row["ok"] for row in verdict["details"]["rows"])
 
 
-# The verifier gets contract instances, as NanoAgent's sandbox builds them from JSON.
-def verify_input(tool: str, value: dict) -> dict:
-    return verifier.verify_input(tool, build_output(value, TOOLS[Tool(tool)][0]))
+def first_move(workspace: Path, reference):
+    return next(file for file in reference.files if file.quota and file.action.value == "move")
 
 
-def verify_output(tool: str, value: dict, output: dict, workspace: Path) -> dict:
-    given, made = TOOLS[Tool(tool)]
-    return verifier.verify_output(tool, build_output(value, given), build_output(output, made), str(workspace))
+def first_delete(reference):
+    return next(file for file in reference.files if file.quota and file.action.value == "delete")
 
 
-def verify_task(reference: dict, workspace: Path, arguments: dict = ARGUMENTS) -> dict:
-    return verifier.verify_task("organize", build_output(arguments, OrganizeInput), build_output(reference, PinOutput), str(workspace))
+def break_answer_key(workspace, reference, output):
+    files = list(reference.files)
+    index = files.index(first_move(workspace, reference))
+    files[index] = dataclasses.replace(files[index], target=files[index].target.replace(".", "_9.", 1) if "." in files[index].target else files[index].target + "_9")
+    return workspace, dataclasses.replace(reference, files=files), output
 
 
-def pages(workspace: Path) -> list:
-    files, offset = [], 0
-    while offset is not None:
-        page = inventory(InventoryInput(root=ROOT, offset=offset, limit=100), workspace)
-        files += page.files
-        offset = page.next
-    return files
+def break_folder(workspace, reference, output):
+    return workspace, reference, dataclasses.replace(output, folder="Elsewhere")
 
 
-def listed(workspace: Path) -> list[rules.Row]:
-    return [rules.Row(**{name: value for name, value in dataclasses.asdict(file).items() if name != "i"}) for file in pages(workspace)]
+def break_presence(workspace, reference, output):
+    shutil.rmtree(workspace / FOLDER)
+    return workspace, reference, output
 
 
-def numbers(workspace: Path) -> dict[str, int]:
-    return {file.path: file.i for file in pages(workspace)}
+def break_contents(workspace, reference, output):
+    (workspace / FOLDER / first_move(workspace, reference).target).write_bytes(b"lost")
+    return workspace, reference, output
 
 
-def apply(workspace: Path, moves: list[tuple[str, str]], deletes: list[str]) -> None:
-    """Apply a whole plan by file number, in batches of 80 moves and 80 deletes, as the tool takes them."""
-    ids = numbers(workspace)
-    for start in range(0, max(len(moves), len(deletes), 1), 80):
-        batch = PlanInput(root=ROOT, moves=[Move(i=ids[src], dst=dst) for src, dst in moves[start : start + 80]], deletes=[ids[path] for path in deletes[start : start + 80]])
-        outcome = apply_plan(batch, workspace)
-        assert not outcome.errors, outcome.errors
+def break_placement(workspace, reference, output):
+    target = workspace / FOLDER / first_move(workspace, reference).target
+    target.rename(target.with_name("elsewhere-" + target.name))
+    return workspace, reference, output
 
 
-def planned(workspace: Path) -> rules.Plan:
-    return rules.plan(listed(workspace))
+def break_deletes(workspace, reference, output):
+    deleted = first_delete(reference)
+    path = workspace / FOLDER / deleted.path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x00\x00\x00\x01Bud1" if deleted.junk else b"back")
+    return workspace, reference, output
 
 
-def test_approves_the_folder_tidied_by_the_rules(workspace: Path, reference: dict) -> None:
-    plan = planned(workspace)
-    apply(workspace, list(plan.moves), list(plan.deletes))
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is True and verdict["score"] == 1.0
-    assert verdict["message"] == f"all {plan.unique} files are in place and nothing else remains"
-    assert verdict["details"]["placed"] == plan.unique == reference["unique"]
-    assert all(verdict["details"][key] == [] for key in ("missing", "misplaced", "duplicates_kept", "extra", "leftovers", "bad_names"))
+def break_extra(workspace, reference, output):
+    (workspace / FOLDER / "stray.txt").write_text("stray")
+    return workspace, reference, output
 
 
-def test_approves_the_plan_applied_in_three_batches_by_number(workspace: Path, reference: dict) -> None:
-    """The hosted path: the files numbered 0-14, then 15-29, then 30-44, from the page unpack_inbox
-    returns; names were decided over all files."""
-    plan = planned(workspace)
-    page = unpack_inbox(build_output(ARGUMENTS, OrganizeInput), workspace).inventory
-    ids = {file.path: file.i for file in page.files}
-    assert page.total == 45 and page.next is None and len(ids) == 45
-    for low, high in ((0, 15), (15, 30), (30, 45)):
-        moves = [Move(i=ids[src], dst=dst) for src, dst in plan.moves if low <= ids[src] < high]
-        deletes = [ids[path] for path in plan.deletes if low <= ids[path] < high]
-        assert moves or deletes
-        outcome = apply_plan(PlanInput(root=ROOT, moves=moves, deletes=deletes), workspace)
-        assert not outcome.errors, outcome.errors
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is True and verdict["score"] == 1.0
+def break_summary(workspace, reference, output):
+    return workspace, reference, dataclasses.replace(output, deleted=output.deleted + 1)
 
 
-def test_refuses_an_untouched_folder_with_score_zero(workspace: Path, reference: dict) -> None:
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and verdict["score"] == 0.0
-    assert len(verdict["details"]["missing"]) == reference["unique"] and len(verdict["details"]["leftovers"]) == 45
-    assert "missing" in verdict["message"] and "left outside" in verdict["message"]
+def break_saved_back(workspace, reference, output):
+    crowd = workspace / "Crowd"
+    crowd.mkdir()
+    for index in range(5000):
+        (crowd / f"{index}.txt").write_bytes(b"x")
+    return workspace, reference, output
 
 
-def test_refuses_duplicates_moved_instead_of_deleted(workspace: Path, reference: dict) -> None:
-    rows = {row.path: row for row in listed(workspace)}
-    plan = planned(workspace)
-    kept = {digest for digest, _path in plan.expected}
-    copies = [path for path in plan.deletes if rows[path].sha256 in kept]
-    assert copies
-    moves = list(plan.moves) + [(path, f"organized/duplicates/{index}-{rules.file_name(path)}") for index, path in enumerate(copies)]
-    apply(workspace, moves, [path for path in plan.deletes if path not in copies])
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and verdict["score"] == 1.0
-    assert "duplicate" in verdict["message"] and "not named by the rules" in verdict["message"]
-    assert len(verdict["details"]["duplicates_kept"]) == len({rows[path].sha256 for path in copies})
-    assert len(verdict["details"]["bad_names"]) == len(copies)
+BREAKS = {
+    "answer-key": break_answer_key,
+    "submitted-folder": break_folder,
+    "folder-present": break_presence,
+    "every-file-kept": break_contents,
+    "moved-to-rules-path": break_placement,
+    "duplicates-and-junk-removed": break_deletes,
+    "nothing-extra": break_extra,
+    "summary-matches": break_summary,
+    "saved-back": break_saved_back,
+}
 
 
-def test_refuses_a_near_duplicate_deleted_by_name_and_size(workspace: Path, reference: dict) -> None:
-    rows = listed(workspace)
-    plan = planned(workspace)
-    seen: dict[tuple[str, int], rules.Row] = {}
-    victims = []
-    for row in rows:
-        key = (rules.file_name(row.path), row.size)
-        if key in seen and seen[key].sha256 != row.sha256 and row.size:
-            victims.append(row.path)
-        seen.setdefault(key, row)
-    assert victims, "the folder holds near-duplicates"
-    apply(workspace, [(src, dst) for src, dst in plan.moves if src not in victims], list(plan.deletes) + victims)
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and "missing" in verdict["message"]
-    assert {item["expected"] for item in verdict["details"]["missing"]} == {dst for src, dst in plan.moves if src in victims}
-    assert verdict["score"] == pytest.approx((plan.unique - len(victims)) / plan.unique)
+@pytest.mark.parametrize("constraint", sorted(BREAKS))
+def test_each_constraint_fails_when_broken_and_the_score_drops(gold, constraint: str) -> None:
+    verdict = judge(*BREAKS[constraint](*gold))
+    assert not verdict["valid"] and verdict["score"] < 1.0, verdict["message"]
+    assert constraint in failed(verdict), (failed(verdict), verdict["message"])
+    assert verdict["message"].split(".")[0].endswith("checks failed") or "checks failed" in verdict["message"]
+    if constraint in ("answer-key", "folder-present"):
+        assert verdict["score"] == 0.0
+        later = [entry for entry in verdict["details"]["constraints"][3:]]
+        assert all(entry["ok"] is None for entry in later)
 
 
-def test_refuses_types_taken_from_the_extension(workspace: Path, reference: dict) -> None:
-    rows = listed(workspace)
-    plan = planned(workspace)
-    wrong = []
-    for row in rows:
-        claimed = {"jpeg": "jpg", "htm": "html"}.get(row.ext.lower(), row.ext.lower())
-        if row.size and not rules.is_junk(rules.file_name(row.path)) and claimed != row.type:
-            wrong.append(rules.Row(**{**dataclasses.asdict(row), "type": claimed if claimed in rules.CATEGORIES else "bin"}))
-    assert wrong, "the folder holds misnamed files"
-    by_path = {row.path: row for row in rows}
-    by_path.update({row.path: row for row in wrong})
-    misplan = rules.plan(list(by_path.values()))
-    apply(workspace, list(misplan.moves), list(misplan.deletes))
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and "misplaced" in verdict["message"]
-    assert verdict["details"]["misplaced"] and not verdict["details"]["bad_names"], "ext typing gives rule-shaped names in the wrong place"
-    assert verdict["score"] < 1.0 and plan.unique == misplan.unique
+def test_others_untouched_fails_when_a_file_beyond_the_quota_changes(tmp_path: Path) -> None:
+    workspace, reference, output = run(tmp_path, messy(4, "multirun", FOLDER))
+    waiting = next(file for file in reference.files if not file.quota)
+    (workspace / FOLDER / waiting.path).write_bytes(b"changed")
+    verdict = judge(workspace, reference, output)
+    assert "others-untouched" in failed(verdict) and verdict["score"] < 1.0
+    assert verdict["details"]["remaining"] == reference.pending - reference.quota > 0
 
 
-def test_refuses_the_wrong_copy_kept(workspace: Path, reference: dict) -> None:
-    rows = listed(workspace)
-    plan = planned(workspace)
-    by_hash: dict[str, list[rules.Row]] = {}
-    for row in rows:
-        if row.size and not rules.is_junk(rules.file_name(row.path)):
-            by_hash.setdefault(row.sha256, []).append(row)
-    latest = {digest: max(group, key=lambda row: (row.mtime_utc, row.path)) for digest, group in by_hash.items() if len(group) > 1}
-    changed = [latest[digest] for digest, group in by_hash.items() if digest in latest and rules.target(latest[digest]) != rules.target(min(group, key=lambda row: (row.mtime_utc, row.path)))]
-    assert changed, "keeping the latest copy changes at least one final path"
-    kept = [row for row in rows if row.sha256 not in latest or row.path == latest[row.sha256].path]
-    misplan = rules.plan(kept)
-    apply(workspace, list(misplan.moves), [row.path for row in rows if row.path not in {row.path for row in kept}])
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and "misplaced" in verdict["message"]
-    assert len(verdict["details"]["misplaced"]) >= len(changed) and plan.unique == misplan.unique
+def test_organized_by_rules_rereads_the_bytes(tmp_path: Path) -> None:
+    jpeg = builders.jpeg(3, "2019-07-14")
+    workspace, reference, output = run(tmp_path, {"Downloads/photo.jpg": jpeg, "Downloads/x.txt": b"x\n"})
+    files = list(reference.files)
+    photo = next(index for index, file in enumerate(files) if file.path == "photo.jpg")
+    wrong_base = "organized/images/png/2019/2019-07-14_photo.png"  # a forged answer key that calls the JPEG a PNG
+    files[photo] = dataclasses.replace(files[photo], group="images", type="png", ext="png", base=wrong_base, target=wrong_base)
+    forged = dataclasses.replace(reference, files=files)
+    real = workspace / FOLDER / reference.files[photo].target
+    moved = workspace / FOLDER / wrong_base
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    real.rename(moved)
+    verdict = judge(workspace, forged, output)
+    assert "organized-by-rules" in failed(verdict) and verdict["details"]["constraints"][0]["ok"] is True
 
 
-def test_refuses_collisions_ordered_by_name(workspace: Path, reference: dict) -> None:
-    rows = listed(workspace)
-    plan = planned(workspace)
-    kept = {src for src, _dst in plan.moves}
-    taken: set[str] = set()
-    moves = []
-    for row in sorted((row for row in rows if row.path in kept), key=lambda row: row.path):
-        base = rules.target(row)
-        destination, number = base, 1
-        while destination in taken:
-            number += 1
-            destination = rules.with_suffix(base, number)
-        taken.add(destination)
-        moves.append((row.path, destination))
-    assert sorted(moves) != sorted(plan.moves), "naming by path order differs from the rules for this folder"
-    apply(workspace, moves, list(plan.deletes))
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and "misplaced" in verdict["message"]
+def test_verdicts_are_valid_exactly_when_the_score_is_one(tmp_path: Path) -> None:
+    for number, mistake in enumerate((None, "keeper_wrong", "duplicate_kept", "rank_swapped", "skipped_batch", "junk_as_move")):
+        organizer.RUN = None
+        seed = next(seed for seed in range(1, 60) if suits(seed))
+        verdict = judge(*run(tmp_path / str(number), messy(seed, "small", FOLDER), mistake=mistake))
+        assert verdict["valid"] == (verdict["score"] == 1.0) == (mistake is None), (mistake, verdict["message"])
 
 
-def test_refuses_junk_and_empty_files_kept(workspace: Path, reference: dict) -> None:
-    rows = {row.path: row for row in listed(workspace)}
-    plan = planned(workspace)
-    junk = [path for path in plan.deletes if rules.is_junk(rules.file_name(path)) and rows[path].size]
-    empty = [path for path in plan.deletes if rows[path].size == 0]
-    assert junk and empty
-    moves = list(plan.moves)
-    moves += [(path, rules.target(rows[path])) for path in junk]
-    moves += [(path, rules.with_suffix(rules.target(rows[path]), 9)) for path in empty]
-    apply(workspace, moves, [path for path in plan.deletes if path not in junk and path not in empty])
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and verdict["score"] == 1.0
-    assert "other file" in verdict["message"]
-    assert len(verdict["details"]["extra"]) == len(junk) + len(empty)
+def suits(seed: int) -> bool:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        unpack(messy(seed, "small", FOLDER), Path(tmp))
+        organizer.RUN = None
+        rows = plain_rows(organizer.survey(OrganizeInput(folder=FOLDER), Path(tmp)))
+        organizer.RUN = None
+    helper = agent()
+    decided = helper.plan_rows(rows)
+    try:
+        for mistake in (helper.keeper_wrong, helper.duplicate_kept, helper.rank_swapped, helper.junk_as_move):
+            mistake(decided)
+    except RuntimeError:
+        return False
+    return len(rows) <= 60 and len(rows) > 30
 
 
-def test_refuses_files_left_in_the_inbox(workspace: Path, reference: dict) -> None:
-    plan = planned(workspace)
-    apply(workspace, list(plan.moves)[:-3], list(plan.deletes))
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and "left outside" in verdict["message"]
-    assert verdict["details"]["leftovers"] == sorted(src for src, _dst in plan.moves[-3:])
-    assert verdict["score"] == pytest.approx((plan.unique - 3) / plan.unique)
+def test_tool_inputs_are_checked() -> None:
+    assert verifier.verify_input("survey", OrganizeInput(folder="Downloads"))["valid"]
+    for folder in (".git", "a/organized", "", "x" * 101, "a/../b"):
+        assert not verifier.verify_input("pin_layout", OrganizeInput(folder=folder))["valid"], folder
+    ok = ApplyInput(folder="D", moves=[Move(i=1, n=1)], deletes=[2])
+    assert verifier.verify_input("apply", ok)["valid"]
+    for bad in (
+        ApplyInput(folder="D", moves=[Move(i=1, n=1)], deletes=[1]),
+        ApplyInput(folder="D", moves=[Move(i=1, n=0)], deletes=[]),
+        ApplyInput(folder="D", moves=[Move(i=-1, n=1)], deletes=[]),
+        ApplyInput(folder="D", moves=[Move(i=index, n=1) for index in range(61)], deletes=[]),
+    ):
+        assert not verifier.verify_input("apply", bad)["valid"]
 
 
-def test_refuses_a_name_date_used_over_metadata(workspace: Path, reference: dict) -> None:
-    rows = listed(workspace)
-    plan = planned(workspace)
-    kept = {src: dst for src, dst in plan.moves}
-    moves = []
-    for row in sorted((row for row in rows if row.path in kept), key=lambda row: (row.mtime_utc, row.path)):
-        date = rules.name_date(rules.file_name(row.path)) or rules.embedded_date(row) or row.mtime_utc[:10]
-        moves.append((row.path, f"organized/{rules.CATEGORIES[row.type]}/{date[:4]}/{date}_{rules.slug(rules.file_name(row.path))}.{row.type}"))
-    taken: dict[str, int] = {}
-    unique_moves = []
-    for src, dst in moves:
-        number = taken.get(dst, 0) + 1
-        taken[dst] = number
-        unique_moves.append((src, dst if number == 1 else rules.with_suffix(dst, number)))
-    assert sorted(unique_moves) != sorted(plan.moves), "a name date disagrees with embedded metadata in this folder"
-    apply(workspace, unique_moves, list(plan.deletes))
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and "misplaced" in verdict["message"]
+def test_a_tampered_answer_key_fails_its_output_check(tmp_path: Path) -> None:
+    unpack(messy(2, "small", FOLDER), tmp_path)
+    pin = organizer.pin_layout(OrganizeInput(folder=FOLDER), tmp_path)
+    given = OrganizeInput(folder=FOLDER)
+    assert verifier.verify_output("pin_layout", given, pin, str(tmp_path))["valid"]
+    files = list(pin.files)
+    files[0] = dataclasses.replace(files[0], sha256="0" * 64)
+    assert not verifier.verify_output("pin_layout", given, dataclasses.replace(pin, files=files), str(tmp_path))["valid"]
+    assert not verifier.verify_output("pin_layout", given, dataclasses.replace(pin, quota=pin.quota - 1), str(tmp_path))["valid"]
+    assert not verifier.verify_output("pin_layout", given, dataclasses.replace(pin, taken=["organized/x"]), str(tmp_path))["valid"]
 
 
-def test_refuses_a_duplicate_kept_under_a_collision_suffix(workspace: Path, reference: dict) -> None:
-    rows = {row.path: row for row in listed(workspace)}
-    plan = planned(workspace)
-    kept = {digest: path for digest, path in plan.expected}
-    copy = next(path for path in plan.deletes if rows[path].sha256 in kept)
-    moves = list(plan.moves) + [(copy, rules.with_suffix(kept[rows[copy].sha256], 7))]
-    apply(workspace, moves, [path for path in plan.deletes if path != copy])
-    verdict = verify_task(reference, workspace)
-    assert verdict["valid"] is False and "1 duplicate kept" in verdict["message"]
-    assert verdict["details"]["duplicates_kept"] == [{"sha256": rows[copy].sha256, "expected": kept[rows[copy].sha256], "extra": [rules.with_suffix(kept[rows[copy].sha256], 7)]}]
+def test_survey_and_apply_outputs_must_match_the_disk(tmp_path: Path) -> None:
+    unpack(messy(2, "small", FOLDER), tmp_path)
+    given = OrganizeInput(folder=FOLDER)
+    survey = organizer.survey(given, tmp_path)
+    rows = list(survey.rows)
+    rows[0] = dataclasses.replace(rows[0], h="f" * 12)
+    assert not verifier.verify_output("survey", given, dataclasses.replace(survey, rows=rows), str(tmp_path))["valid"]
+    bad_summary = dataclasses.replace(survey.summary, stayed=survey.summary.stayed + 1)
+    assert not verifier.verify_output("survey", given, dataclasses.replace(survey, summary=bad_summary), str(tmp_path))["valid"]
+    move = next(row for row in survey.rows if row.drop is None)
+    call = ApplyInput(folder=FOLDER, moves=[Move(i=move.i, n=1)], deletes=[])
+    applied = organizer.apply(call, tmp_path)
+    assert verifier.verify_output("apply", call, applied, str(tmp_path))["valid"]
+    lied = dataclasses.replace(applied, applied=0, errors=[f"move {move.i}: made up"])
+    assert not verifier.verify_output("apply", call, lied, str(tmp_path))["valid"]  # refused, yet the log says this call did it
+    stranger = dataclasses.replace(applied, errors=["move 9999: not one of this call's items"])
+    assert not verifier.verify_output("apply", call, stranger, str(tmp_path))["valid"]
+    hidden_move = ApplyInput(folder=FOLDER, moves=[Move(i=move.i, n=1)], deletes=[])
+    destination = tmp_path / FOLDER / next(entry["to"] for entry in organizer.RUN.applied if entry["i"] == move.i)
+    destination.unlink()
+    assert not verifier.verify_output("apply", hidden_move, applied, str(tmp_path))["valid"]
 
 
-def test_refuses_a_pin_for_another_folder_and_a_missing_folder(tmp_path: Path, reference: dict) -> None:
-    verdict = verify_task(reference, tmp_path, {"seed": 2, "size": "small"})
-    assert verdict["valid"] is False and "another folder" in verdict["message"]
-    verdict = verify_task(reference, tmp_path)
-    assert verdict["valid"] is False and "never unpacked" in verdict["message"]
-
-
-def test_checks_the_tools_inputs() -> None:
-    assert verify_input("pin_inventory", ARGUMENTS)["valid"] is True
-    assert verify_input("unpack_inbox", {"seed": -1, "size": "large"})["valid"] is False
-    assert verify_input("unpack_inbox", {"seed": 10**9, "size": "large"})["valid"] is False
-    assert verify_input("read_rules", {})["valid"] is True
-    assert verify_input("inventory", {"root": ROOT, "offset": 0, "limit": 100})["valid"] is True
-    assert verify_input("inventory", {"root": ROOT, "offset": 0, "limit": 101})["valid"] is False
-    assert verify_input("inventory", {"root": ROOT, "offset": -1, "limit": 10})["valid"] is False
-    assert verify_input("inventory", {"root": "file-organizer/1-tiny", "offset": 0, "limit": 10})["valid"] is False
-    assert verify_input("inventory", {"root": "../" + ROOT, "offset": 0, "limit": 10})["valid"] is False
-    good = {"root": ROOT, "moves": [{"i": 0, "dst": "organized/documents/txt/2020/2020-01-01_b.txt"}], "deletes": [1]}
-    assert verify_input("apply_plan", good)["valid"] is True
-    assert verify_input("apply_plan", {**good, "moves": [{"i": 0, "dst": "../b"}]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "moves": [{"i": 0, "dst": "/organized/b"}]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "moves": [{"i": 0, "dst": "inbox/b"}]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "moves": [{"i": 0, "dst": "organized/../b"}]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "moves": [{"i": 0, "dst": "organized/"}]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "moves": [{"i": -1, "dst": "organized/b"}]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "deletes": [-3]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "moves": [{"i": 0, "dst": "organized/b"}, {"i": 2, "dst": "organized/b"}]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "moves": [{"i": 0, "dst": "organized/b"}, {"i": 0, "dst": "organized/c"}]})["valid"] is False
-    assert verify_input("apply_plan", {**good, "deletes": [0]})["valid"] is False
-    many = [{"i": index, "dst": f"organized/{index}"} for index in range(100, 181)]
-    assert verify_input("apply_plan", {**good, "moves": many})["valid"] is False
-    assert verify_input("apply_plan", {**good, "moves": many[:80]})["valid"] is True
-    assert verify_input("apply_plan", {**good, "deletes": list(range(200, 281))})["valid"] is False
-    assert verify_input("list_tree", {"root": ROOT, "max_entries": 200})["valid"] is True
-    assert verify_input("list_tree", {"root": ROOT, "max_entries": 0})["valid"] is False
-
-
-def test_checks_the_tools_outputs(workspace: Path, tmp_path: Path, reference: dict) -> None:
-    scratch = tmp_path / "scratch"
-    assert verify_output("pin_inventory", ARGUMENTS, reference, scratch)["valid"] is True
-    tampered = json.loads(json.dumps(reference))
-    tampered["expected"][0]["path"] = tampered["expected"][0]["path"].replace("organized/", "organized/images/jpg/2020/2020-01-01_", 1)
-    assert verify_output("pin_inventory", ARGUMENTS, tampered, scratch)["valid"] is False
-    tampered = json.loads(json.dumps(reference))
-    tampered["unique"] += 1
-    assert verify_output("pin_inventory", ARGUMENTS, tampered, scratch)["valid"] is False
-    assert verify_output("pin_inventory", {"seed": 2, "size": "small"}, reference, scratch)["valid"] is False
-
-    rules_md = read_rules(build_output({}, TOOLS[Tool.READ_RULES][0]), workspace).rules
-    first_page = plain_output(inventory(build_output({"root": ROOT, "offset": 0, "limit": 100}, InventoryInput), workspace))
-    unpacked = {"root": ROOT, "files": 45, "dirs": 9, "complete": False, "note": "made", "rules": rules_md, "inventory": first_page}
-    assert verify_output("unpack_inbox", ARGUMENTS, unpacked, workspace)["valid"] is True
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "rules": "# nothing"}, workspace)["valid"] is False
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "files": 44}, workspace)["valid"] is False
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "root": "file-organizer/2-small"}, workspace)["valid"] is False
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "complete": True}, workspace)["valid"] is True
-    short_page = json.loads(json.dumps(first_page))
-    short_page["files"] = short_page["files"][:-1]
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "inventory": short_page}, workspace)["valid"] is False
-    renumbered = json.loads(json.dumps(first_page))
-    renumbered["files"][0]["i"] = 999
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "inventory": renumbered}, workspace)["valid"] is False
-
-    page_input = {"root": ROOT, "offset": 10, "limit": 20}
-    page = plain_output(inventory(build_output(page_input, InventoryInput), workspace))
-    assert verify_output("inventory", page_input, page, workspace)["valid"] is True
-    wrong = json.loads(json.dumps(page))
-    wrong["files"][0]["mtime_utc"] = "2000-01-01T00:00:00Z"
-    assert verify_output("inventory", page_input, wrong, workspace)["valid"] is False
-    wrong = json.loads(json.dumps(page))
-    wrong["next"] = None
-    assert verify_output("inventory", page_input, wrong, workspace)["valid"] is False
-
-    rules_text = plain_output(read_rules(build_output({}, TOOLS[Tool.READ_RULES][0]), workspace))
-    assert verify_output("read_rules", {}, rules_text, workspace)["valid"] is True
-    assert verify_output("read_rules", {}, {"rules": "# nothing"}, workspace)["valid"] is False
-
-    plan = planned(workspace)
-    ids = numbers(workspace)
-    src, dst = plan.moves[0]
-    plan_input = {"root": ROOT, "moves": [{"i": ids[src], "dst": dst}], "deletes": [ids[plan.deletes[0]]]}
-    outcome = plain_output(apply_plan(build_output(plan_input, PlanInput), workspace))
-    assert outcome["errors"] == []
-    assert verify_output("apply_plan", plan_input, outcome, workspace)["valid"] is True
-    assert verify_output("apply_plan", plan_input, {**outcome, "moved": 0}, workspace)["valid"] is False
-    again = {"root": ROOT, "moves": [{"i": 99999, "dst": "organized/x.txt"}], "deletes": [ids[plan.deletes[0]]]}
-    assert verify_output("apply_plan", again, {"moved": 1, "deleted": 1, "removed_dirs": 0, "errors": []}, workspace)["valid"] is False
-    errors = ["move 99999 -> organized/x.txt: unknown number: not in the inventory", f"delete {ids[plan.deletes[0]]}: already deleted"]
-    assert verify_output("apply_plan", again, {"moved": 0, "deleted": 0, "removed_dirs": 0, "errors": errors}, workspace)["valid"] is True
-    worked_page = plain_output(inventory(build_output({"root": ROOT, "offset": 0, "limit": 100}, InventoryInput), workspace))
-    worked = {**unpacked, "inventory": worked_page}
-    assert verify_output("unpack_inbox", ARGUMENTS, {**worked, "files": 43, "complete": True}, workspace)["valid"] is True
-    assert verify_output("unpack_inbox", ARGUMENTS, {**worked, "files": 43, "complete": False}, workspace)["valid"] is False
-    assert verify_output("unpack_inbox", ARGUMENTS, {**worked, "files": 45, "complete": True}, workspace)["valid"] is False
-    assert verify_output("unpack_inbox", ARGUMENTS, {**unpacked, "files": 43, "complete": True}, workspace)["valid"] is False, "a stale page is refused"
-
-    tree_input = {"root": ROOT, "max_entries": 50}
-    tree = plain_output(list_tree(build_output(tree_input, TOOLS[Tool.LIST_TREE][0]), workspace))
-    assert verify_output("list_tree", tree_input, tree, workspace)["valid"] is True
-    assert verify_output("list_tree", tree_input, {**tree, "entries": list(reversed(tree["entries"]))}, workspace)["valid"] is False
-    assert verify_output("list_tree", tree_input, {**tree, "files": 61}, workspace)["valid"] is False
-
-
-def test_the_verdict_is_the_same_twice(workspace: Path, reference: dict) -> None:
-    plan = planned(workspace)
-    apply(workspace, list(plan.moves)[:-2], list(plan.deletes)[:-1])
-    first = verify_task(reference, workspace)
-    second = verify_task(reference, workspace)
-    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
-    shutil.rmtree(workspace / ROOT / "organized")
-    assert verify_task(reference, workspace)["details"]["placed"] == 0
+def test_an_empty_quota_is_valid_only_with_a_true_summary(tmp_path: Path) -> None:
+    files = {"Done/organized/documents/txt/undated/undated_a.txt": b"a\n"}
+    workspace, reference, output = run(tmp_path, files, folder="Done")
+    verdict = judge(workspace, reference, output, folder="Done")
+    assert verdict["valid"] and verdict["message"] == "Done is already organized: its one file is in place."
+    fake = OrganizeOutput(folder="Done", files=1, moved=1, deleted=0, stayed=1, left=0, remaining=0)
+    assert not judge(workspace, reference, fake, folder="Done")["valid"]

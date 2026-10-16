@@ -1,225 +1,135 @@
 # File Organizer
 
-A `nanoagent.plugin/v1` plugin, created by `nanoagent plugin new` with the
-structure of NanoAgent's reference plugin, `plugins/arxiv-source`. Its task,
-`organize`, hands an agent a messy folder made from a seed (duplicates under
-other names, junk, empty and misnamed files, dates hiding in metadata) and asks
-it to delete what the rules delete and move every other file to
-`organized/<category>/<YYYY>/<YYYY-MM-DD>_<slug>.<ext>`. The verifier compares
-the result, hash by hash and path by path, with the layout the rules give.
+A `nanoagent.plugin/v1` plugin for NanoAgent 0.5, with the structure of the reference plugin,
+[arxiv-source](https://github.com/zeyuyang8/arxiv-source). Its task, `organize-folder`, tidies a folder
+of the member's own files: an agent deletes exact duplicates, junk and empty files and files every
+other file under `organized/<group>/<type>/<YYYY>/<YYYY-MM-DD>_<slug>.<ext>` by the rules in
+[src/plugin/RULES.md](src/plugin/RULES.md). A static, rule-based verifier (no model anywhere) compares
+the folder after the run with an answer key pinned before it, hash by hash and path by path, and
+re-reads every file in place to check that it follows the rules for its own bytes.
 
 ## Tools
 
 | Tool | Does | Code |
 |---|---|---|
-| `pin_inventory` | Makes the messy folder in the reference's scratch workspace, applies the rules, and pins every kept file's sha256 and final path with the counts; the `organize` task's reference | `src/plugin/organizer.py` |
-| `unpack_inbox` | Makes the messy folder for `seed` and `size` at `file-organizer/<seed>-<size>/inbox/` and an empty `organized/`, and returns the rules and the first inventory page (at most 100 rows); idempotent: an untouched folder gives the same answer again, a folder already worked on is left as it is (`complete: true`) | `src/plugin/organizer.py` |
-| `read_rules` | Returns `src/plugin/RULES.md`, the rules below, verbatim (the same text `unpack_inbox` returns) | `src/plugin/organizer.py` |
-| `inventory` | One page (at most 100 rows) of every file under the folder, sorted by path: its number `i`, size, sha256, sniffed type, claimed extension, the raw embedded dates (`exif`, `png`, `pdf`, `md`) and `mtime_utc`; nothing normalized; for the pages after the one `unpack_inbox` returns, and re-reads | `src/plugin/organizer.py` |
-| `apply_plan` | Moves (`{i, dst}`, `dst` under `organized/`) then deletes (by number) files inside the folder, at most 80 of each per call: confined to it, files only, never overwriting; an unknown or spent number, like any other failed item, is reported and the rest still applied; empty folders are pruned | `src/plugin/organizer.py` |
-| `list_tree` | The folder's files and sub-folders, sorted, at most 200 entries | `src/plugin/organizer.py` |
+| `pin_layout` | Reads every file in a copy of the agent folder taken before the agent starts, applies the rules and pins each file's facts (sha256, sniffed type, embedded or named date, slug, base path) and the step the rules give it; the task's answer key, which the agent never sees | `src/plugin/organizer.py` |
+| `survey` | Lists this run's files to act on: the first 60 actions in the rules' order, each with its number `i`, the start of its sha256 (`h`), where the rules file it (`base`) and whether to drop it (`junk`, `empty`, or `copy` of a file already in place). The first call of a run fixes the rows; later calls repeat them with the run's summary so far | `src/plugin/organizer.py` |
+| `apply` | Deletes rows by `i` and moves rows `{i, n}` to the n-th free name of their base (`base`, `base_2`, …), in this run's rows only, after checking each file's bytes; a refused item is reported and the others are done; it never deletes the last copy of any content and removes folders left empty | `src/plugin/organizer.py` |
 
-The generator (`src/plugin/generate.py`) builds every byte itself from one
-`random.Random(f"file-organizer:v1:{seed}:{size}")`: JPEGs from five tiny
-fixtures in `src/plugin/data/jpeg/` with an EXIF `DateTimeOriginal` segment
-made by Pillow, PNGs chunk by chunk with a `Creation Time` text chunk, minimal
-PDFs with `/CreationDate`, stored DOCX and ZIP archives with fixed dates, and
-SVG, HTML, Python, JSON, CSV, log, Markdown (with front matter), text and
-opaque binary files. Sizes: small 45, medium 150, large 300 files. About 55 %
-are unique, 25 % extra copies of a file under other names (`Copy of`, `(1)`,
-`- Copy`, `_v2`, upper-case, wrong or missing extensions), 8 % near-duplicates
-(same name and size, different bytes), 6 % junk, 3 % empty, 3 % name collisions;
-12 % of the names claim the wrong type, 40 % carry a date (some invalid), and
-names use accents, spaces and other scripts. Files sit in 8 to 25 folders (a
-small folder: 8 to 10, at most two deep, with short names), some empty, each
-with its own modification time.
+### Tasks
 
-### The task
-
-`organize` takes `{seed, size}`. NanoAgent first runs `pin_inventory` in a
-scratch workspace and pins the layout the rules give. The agent then calls
-`unpack_inbox` (which also returns the rules and the first inventory page of
-100 rows), `inventory` for the pages after it, and `apply_plan` in batches of
-up to 80 moves and 80 deletes, each file named by its inventory number `i`;
-`read_rules` returns the rules again if needed. A file's number is given once, from the first full listing of the
-folder, and stays with it when it moves (the numbers are kept in the plugin
-process and recorded beside the folder as `file-organizer/<seed>-<size>.ids.json`).
-The tools never normalize a date, sniff a duplicate or choose a name for it.
-Everything the agent decides, it decides from the inventory rows and the rules.
-
-Budget: Mochi's hosted runner allows 6 agent steps per run and 2048 tokens
-per reply, hidden reasoning included, so `small` (45 files) is designed to
-take 4 tool calls and the answer: `unpack_inbox`, which returns the rules and
-the whole inventory, then `apply_plan` three times, for the files numbered 0
-to 14, 15 to 29 and 30 to 44, so that each reply only has to think about 15
-files (each call's arguments measure a few hundred tokens, and the folders
-stay shallow with short names). Destinations are still decided over the whole
-inventory: a duplicate's keeper and a collision's suffixes follow the rules
-whatever batch a file is applied in, and a delete goes in the batch of its
-number. Medium and large need a runner with a higher step limit, such as the
-member's own computer: their inventories are 2 and 3 pages and their plans
-several batches of about 30 files.
-
-### The rules
-
-The text below is `src/plugin/RULES.md`, what `read_rules` returns.
-
-# File Organizer rules
-
-Every file under `inbox/` is either deleted or moved to
-`organized/<category>/<YYYY>/<YYYY-MM-DD>_<slug>.<ext>`. When you are done, `inbox/` holds no
-files and `organized/` holds nothing but the kept files. Paths are relative to the task's root.
-
-## 1. Delete
-
-- Junk, by name: `.DS_Store`, `Thumbs.db`, `desktop.ini` (in any letter case), any name starting
-  with `~$`, and any claimed extension `tmp` or `part` (in any letter case).
-- Empty files (size 0).
-- Exact duplicates: files with the same `sha256` are one file. Keep the copy with the earliest
-  `mtime_utc`; on a tie, the smallest `path` (plain string order). Delete every other copy. The
-  same name or the same size never makes a duplicate; only the hash does.
-
-## 2. Category and extension: by content, never by the name
-
-The inventory's `type` is sniffed from the bytes, in this order: `pdf` (`%PDF-`), `png`, `jpg`
-(JPEG), `docx` (a zip holding `word/document.xml`), `zip`, `svg` (`<svg` after an optional XML
-declaration), `html` (`<!DOCTYPE html` or `<html`), `py` (a `#!` first line naming python),
-`json` (parses, starting with `{` or `[`), `log` (first line starts with `YYYY-MM-DD HH:MM:SS` or
-`YYYY-MM-DDTHH:MM:SS`), `md` (first line is a `# ` heading or `---`), `csv` (3 or more lines,
-every line the same number of commas, at least one), `txt` (any other UTF-8 text), `bin`
-(anything else).
-
-| type | category | ext |
+| Task | Does | Runner |
 |---|---|---|
-| pdf | documents/pdf | pdf |
-| png | images/png | png |
-| jpg | images/jpg | jpg |
-| docx | documents/docx | docx |
-| zip | archives/zip | zip |
-| svg | images/svg | svg |
-| html | documents/html | html |
-| py | code/py | py |
-| json | data/json | json |
-| log | logs/log | log |
-| md | documents/md | md |
-| csv | data/csv | csv |
-| txt | documents/txt | txt |
-| bin | other/bin | bin |
+| `organize-folder` | Tidies the member's folder by the rules and submits the run's summary (an `OrganizeOutput`) | `agent`, with `survey` and `apply`; reference `pin_layout` |
 
-The claimed extension (`ext`) is ignored: a JPEG named `.JPEG`, `.png` or `.txt` becomes `.jpg`.
+The tools work out what one file says about itself: its type from its bytes, its date from its
+metadata or its name, its slug and its base path. The agent makes the decisions that take several
+files: which copy of duplicated bytes stays (the earliest in the rules' order), which collision number
+each file gets, the batches, and repairing anything a call refuses. (All three live runs of version
+0.1.1, which asked the hosted model to derive every date and slug itself, ran out of reply tokens.)
 
-## 3. Date: the first of these that gives a real calendar date
+### Using it
 
-1. An embedded value, as the inventory reports it: `exif` (EXIF DateTimeOriginal,
-   `YYYY:MM:DD HH:MM:SS`, so its first ten characters with `:` turned into `-`), else `png`
-   (PNG Creation Time: `YYYY-MM-DD...`, or RFC 1123 `Day, DD Mon YYYY HH:MM:SS GMT`, whose day,
-   month and year give the date), else `pdf` (`D:YYYYMMDD...`: the eight digits after `D:`),
-   else `md` (the front-matter `date` value, with or without quotes, whose first ten characters
-   are `YYYY-MM-DD`). A value that is not a real date (month 13, day 31 of April) is skipped.
-2. Else the file's own name (folder names do not count): the first `YYYY-MM-DD` or `YYYYMMDD`
-   that is not touching other digits, is a real date and has a year from 1990 to 2030.
-3. Else the date part of `mtime_utc`.
+Upload the files to organize into your File Organizer agent folder on RUSH Lab (for example into a
+folder `Downloads`), open the plugin and ask its chat, e.g. "organize my Downloads folder". The chat
+runs `organize-folder` with `{"folder": "Downloads"}` (`.` means the whole agent folder). The folder is
+tidied in place: afterwards it holds `organized/` plus anything hidden, and RUSH Lab saves the result
+back to your agent folder.
 
-## 4. Slug: from the kept copy's own name
+A hosted run allows 6 agent steps and about 2,000 output tokens per reply, so one run does at most 60
+actions: `survey`, `apply` for the first 30 rows, `apply` for the rest, a spare step for errors, and
+`submit`. A folder that needs more says so ("N more: ask again to continue"): ask again and the next run
+carries on from the folder as it is, with the same rules.
 
-Take the name without its claimed extension (an extension is 1 to 10 letters or digits after the
-last `.`, when that `.` is not the first character). Then: normalize to NFKD and drop every
-non-ASCII character; lowercase; strip copy markers from the end, again and again until nothing
-matches, with the regular expression
-`(\s*\(\d+\)|\s*-\s*copy(\s*\(\d+\))?|[\s_-]+copy\d*|[-_ ]?(final|v\d+))$`; turn every run of
-characters other than `a-z` and `0-9` into one `-`; trim `-` from both ends. If nothing is left,
-the slug is `file`.
+## Constraints
 
-## 5. Collisions
+`verify_task` checks these in order and lists every one in `details.constraints`
+(`{id, constraint, ok, expected, actual, message}`; `ok` is null when an earlier failure means it was
+not checked). The verdict is valid only when all hold, and only then is the score 1.0.
 
-Name the kept files in `(mtime_utc, path)` order. When a file's path is already taken, append `-2`
-to its slug, then `-3`, and so on, to the first free path.
+| # | id | Holds when |
+|---|---|---|
+| 1 | `answer-key` | The pinned answer key is for this folder and is exactly the rules applied to its pinned facts |
+| 2 | `submitted-folder` | The submitted result names the folder the task asked for |
+| 3 | `folder-present` | The folder is still in the agent folder |
+| 4 | `every-file-kept` | Every content the folder must keep still exists somewhere in it |
+| 5 | `moved-to-rules-path` | Every file this run moves holds its bytes at exactly the path the rules give it |
+| 6 | `duplicates-and-junk-removed` | Every duplicate, junk and empty file this run deletes is gone |
+| 7 | `others-untouched` | Every file this run does not act on is where it was, byte for byte |
+| 8 | `nothing-extra` | The folder holds no other file (no copies left behind, no strays, no symlinks) |
+| 9 | `organized-by-rules` | Every file in place follows the rules when re-read from its own bytes |
+| 10 | `summary-matches` | The submitted summary's counts match the folder (moved = new paths, deleted, left, stayed, remaining) |
+| 11 | `saved-back` | The agent folder holds fewer than 5,000 entries, so RUSH Lab saves the result |
 
-## Inventory columns
+Score = hits / (hits + misses): hits are this run's moves at their path and deletes done; misses are
+every path that differs in checks 5-9, counted once, plus one per failed check 2, 10 or 11. A failed
+check 1 or 3 scores 0.
 
-`i` (the file's number, the same for the whole task even after it moves: `apply_plan` moves and
-deletes files by it), `path` (relative to root), `size` (bytes), `sha256`, `type` (sniffed), `ext`
-(as the name claims; empty for none), `exif`, `png`, `pdf`, `md` (the raw embedded values, or
-null), `mtime_utc` (`YYYY-MM-DDTHH:MM:SSZ`). `unpack_inbox` returns the first page of the
-inventory with these rules; `inventory` returns any page.
+## The rules
 
-### Verifier
+[src/plugin/RULES.md](src/plugin/RULES.md) is the whole specification, and the only thing the
+independent oracle in `tests/oracle/` is written from. In short:
 
-`verifier/rules.py` implements the rules once, with only what a verifier may
-import; `src/plugin/rules.py` is its byte-identical copy (a test asserts it), so
-the reference, the inventory and the checks all run the same code. The
-verifier reads the EXIF segment, the PNG chunks, the PDF info dictionary and
-the zip central directory by hand, and computes UTC dates by arithmetic.
-
-- `verify_output` of `pin_inventory` recomputes the whole plan from the files
-  the tool made in its scratch workspace and demands the pinned layout and
-  counts equal it; of `inventory` (and of the page `unpack_inbox` returns),
-  that the page equals the rules' own reading of the folder and each number
-  matches the folder's record; of `apply_plan`,
-  that every item not reported as failed has happened (the moved file is at its
-  destination under its number, the deleted one is gone); of `unpack_inbox` and
-  `list_tree`, the counts on disk.
-- `verify_task` walks the folder: `inbox/` and everything outside `organized/`
-  must hold no file; every file under `organized/` is hashed; each pinned
-  sha256 must sit exactly once at exactly its pinned path; nothing else may be
-  there; every path must be one the rules could give. The score is the share of
-  pinned files in place; the verdict is valid only when everything holds.
-  Details list the missing, misplaced, duplicate, extra and leftover files and
-  the odd names, so the page can show a mismatch table.
-
-Scripted gold cases under `tests/cases/` run the small folder as the three
-batches by number the instructions prescribe and as one `apply_plan` call,
-and the medium and large folders in batches. Adversarial cases, each a test in
-`tests/test_verifier.py` and a scripted case under `tests/cases/`: duplicates
-moved instead of deleted, a unique
-near-duplicate deleted, a copy rewritten with different bytes, types taken
-from the extension, the wrong copy kept, collisions ordered by name, junk or
-empty files kept, dedup by size and name, files left in the inbox, and a
-name date used over embedded metadata.
+- Junk (`.DS_Store`, `Thumbs.db`, `._*`, `~$*`, `.tmp`, `.part`, `.crdownload`, …) and empty files are
+  deleted; hidden files and folders (`.git/`, …) are left alone.
+- The **content** decides the type, never the name: about 35 real formats (PDF, PNG, JPEG, GIF, WebP,
+  HEIC, AVIF, TIFF and camera raw, MP3, FLAC, OGG, WAV, MP4, MOV, M4A, WebM, MKV, AVI, docx, xlsx,
+  pptx, odt, ods, odp, epub, zip, gz, tar, 7z, rar, and text by its extension or content).
+- The **date** is the one embedded in the file (EXIF, PNG text, PDF, Office and OpenDocument
+  properties, the MP4 movie header, Markdown front matter), else a date in the name, else `undated`.
+  Modification times are never used: uploading a file changes them.
+- Exact duplicates (same sha256) keep their earliest copy in the rules' order; a name already taken
+  gets `_2`, `_3`, …; a name already in scheme form keeps its slug, so organizing an organized folder
+  changes nothing.
 
 ## Layout
 
-```text
-.
-├── nanoagent.yaml   # manifest (a slimconfig ManifestConfig): id, runtime, permissions, tools, tasks
-├── contract.py      # each tool's and task's typed input and output: slimconfig Output classes
-├── README.md
-├── LICENSE
-├── pyproject.toml
-├── uv.lock
-├── .gitignore
-├── .env             # environment variable NAMEs this plugin needs (none here)
-├── run.sh           # exits 0 when this environment can run the plugin
-├── src/plugin/      # the MCP server (__main__.py), the tools, the generator, RULES.md, rules.py, data/
-├── tests/           # unit tests, and scripted gold and wrong cases under tests/cases/
-├── ui/              # the page: app.js, organizer.js (its logic), app.css
-└── verifier/        # deterministic verifier package: rules.py and one module per tool
+```
+contract.py            every tool's and the task's input and output classes
+nanoagent.yaml         the manifest: tools, the organize-folder task and its instructions
+src/plugin/
+  RULES.md             the rules, in words
+  organizer.py         the tools: pin_layout, survey, apply (the run's state, safe moves and deletes)
+  naming.py sniff.py meta.py formats.py inflate.py walk.py plan.py layout.py
+                       the rules in code (shared, byte for byte, with verifier/)
+  __main__.py          the MCP server
+verifier/              verify_input, verify_output, verify_task (task.py: the 11 constraints), plus
+                       byte-identical copies of the rule modules
+ui/renderers.js        draws OrganizeOutput with the verifier's checks and this run's files
+tests/                 unit, property, oracle-differential, server and replay tests; tests/cases/
+                       holds the scripted cases and the folders they run on
 ```
 
-`contract.py` types every value: the server builds each call's input into its
-class and checks its output against its own, and NanoAgent and the verifier
-get the same classes. `verifier/` imports only the standard library and
-`contract`. Its input checks hold what a type cannot: a seed between 0 and
-999999999, a root of the form `file-organizer/<seed>-<size>`, pages of 1 to
-100 rows, at most 80 moves and 80 deletes per call, listings of 1 to 200
-entries, and plan paths that stay inside the folder.
+The plugin reaches no network host and writes only in the workspace: the folder itself and
+`.file-organizer/state.json`, the run's state (its rows and every move and delete), which the
+verifier checks after each call.
 
 ## Develop and run
 
 ```bash
 uv sync --extra dev
-uv run pytest
+uv run pytest                       # offline: unit, property, differential and replay tests
+uv run python tests/corpus/fetch.py # optional: download the real-file corpus (licences in tests/corpus/sources.json)
+uv run pytest -m corpus             # the same checks on folders built from real files
+uv run ruff check .
 ```
 
-From the NanoAgent repository root:
+Run the task exactly as NanoAgent does, with a scripted agent instead of a model, through the lab's
+harness (`scripted_task.py` from the RUSH Lab plugin tooling):
 
 ```bash
-.venv/bin/nanoagent plugin inspect plugins/file-organizer
+python scripted_task.py . tests/cases/gold_small.json --sandbox seatbelt
 ```
 
-Scripted gold and wrong runs through NanoAgent's own task runner, with the
-harness in `~/mochi-dev/harness`:
+`tests/cases/build_cases.py` rebuilds every case and its folder from the builders, deterministically.
 
-```bash
-<nanoagent venv>/bin/python ~/mochi-dev/harness/scripted_task.py . tests/cases/gold_small.json
-```
+## Limitations
+
+- One run does at most 60 actions; larger folders take several runs (the verdict says how many remain).
+- A folder is refused when it holds more than 1,000 files, 200 MiB, a file over 10 MiB, a symlink,
+  paths deeper than 12 folders or longer than 300 characters, case or Unicode variants of the folders
+  the rules create, or would leave more than 4,900 entries in the agent folder.
+- Dates come only from the metadata RULES.md lists (no XMP, no compressed PDF object streams, no ID3
+  or QuickTime text dates); camera raw files other than TIFF-based ones, Fuji RAF and Canon CR3
+  without an Exif block are undated unless their name carries a date.
+- Embedded dates are taken as stored, with no time-zone conversion.

@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nanoagent-file-organizer"
-version = "0.1.1"
-description = "File Organizer: tidy a messy folder by exact rules, checked file by file"
+version = "0.2.0"
+description = "File Organizer: tidy your own folder by exact rules, checked file by file"
 requires-python = ">=3.12"
-dependencies = ["mcp>=1.27,<2", "slimconfig", "pillow>=11,<13"]
+dependencies = ["mcp>=1.27,<2", "slimconfig"]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "pillow>=11,<13"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -21,6 +21,11 @@ slimconfig = { git = "https://github.com/zeyuyang8/slimconfig", branch = "master
 [tool.ruff]
 line-length = 120
 
+[tool.setuptools.package-data]
+# The rules ship inside the package, whichever way it is installed.
+plugin = ["RULES.md"]
+
 [tool.pytest.ini_options]
 # contract.py and verifier/ live at the plugin root.
 pythonpath = ["."]
+markers = ["corpus: needs the real-file corpus (python tests/corpus/fetch.py; or set FILE_ORGANIZER_CORPUS=1 to fetch it)"]

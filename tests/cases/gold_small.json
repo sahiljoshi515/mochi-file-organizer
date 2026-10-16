@@ -1,52 +1,39 @@
 {
-  "task": "organize",
-  "arguments": {
-    "seed": 1,
-    "size": "small"
+ "note": "messy(seed=57, small): one run does everything",
+ "task": "organize-folder",
+ "arguments": {
+  "folder": "Downloads"
+ },
+ "agent_folder": "folders/small.tar.gz",
+ "steps": [
+  {
+   "tool": "survey",
+   "arguments": {
+    "folder": "Downloads"
+   },
+   "save_as": "survey"
   },
-  "steps": [
-    {
-      "tool": "unpack_inbox",
-      "arguments": {
-        "seed": 1,
-        "size": "small"
-      },
-      "save_as": "start"
-    },
-    {
-      "python": "import importlib.util, sys\nfrom pathlib import Path\nwords = [w for w in sys.argv[1:] if not w.startswith('-')]\ncase = next(Path(w) for w in words if w.endswith('.json')).resolve()\nspec = importlib.util.spec_from_file_location('plan_from_inventory', case.parent / 'plan_from_inventory.py')\nhelper = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(helper)\nfor index, batch in enumerate(helper.harness_plan(outputs, ['start', 'inv0', 'inv1', 'inv2'], 'gold', 3, [15, 30])):\n    outputs[f'batch{index}'] = batch\n"
-    },
-    {
-      "tool": "apply_plan",
-      "arguments": {
-        "root": "$ref:start.root",
-        "moves": "$ref:batch0.moves",
-        "deletes": "$ref:batch0.deletes"
-      },
-      "save_as": "applied0"
-    },
-    {
-      "tool": "apply_plan",
-      "arguments": {
-        "root": "$ref:start.root",
-        "moves": "$ref:batch1.moves",
-        "deletes": "$ref:batch1.deletes"
-      },
-      "save_as": "applied1"
-    },
-    {
-      "tool": "apply_plan",
-      "arguments": {
-        "root": "$ref:start.root",
-        "moves": "$ref:batch2.moves",
-        "deletes": "$ref:batch2.deletes"
-      },
-      "save_as": "applied2"
-    }
-  ],
-  "answer": "Deleted every junk, empty and duplicate file and moved every other file to organized/ by the rules.",
-  "expect": {
-    "valid": true,
-    "score_min": 1.0
+  {
+   "python": "\"\"\"The scripted agent: decides a survey's rows exactly as the organize-folder instructions say (a row with\ndrop is deleted; a row whose h an earlier kept row has is deleted; any other row moves with n = 1 + the\nearlier rows moved with the same base), splits them into calls of 30, and makes the mistakes the wrong\ncases need. build_cases.py inlines this file into a case's python step, which then calls\n`decide(outputs, folder, mistake)`; the step fills outputs[\"batch0\"], [\"batch1\"] (and [\"fix\"]).\n\"\"\"\n\n\ndef plan_rows(rows):\n    \"\"\"[(row, action, n)] for the rows, in order, by the instructions.\"\"\"\n    decided, kept_h, moved_per_base = [], set(), {}\n    for row in rows:\n        if row[\"drop\"] or row[\"h\"] in kept_h:\n            decided.append((row, \"delete\", None))\n            continue\n        kept_h.add(row[\"h\"])\n        moved_per_base[row[\"base\"]] = moved_per_base.get(row[\"base\"], 0) + 1\n        decided.append((row, \"move\", moved_per_base[row[\"base\"]]))\n    return decided\n\n\ndef calls(folder, decided, size=30):\n    \"\"\"The decisions as apply inputs: the first `size` rows, then the rest.\"\"\"\n    batches = []\n    for part in (decided[:size], decided[size:]):\n        batches.append(\n            {\n                \"folder\": folder,\n                \"moves\": [{\"i\": row[\"i\"], \"n\": n} for row, action, n in part if action == \"move\"],\n                \"deletes\": [row[\"i\"] for row, action, _n in part if action == \"delete\"],\n            }\n        )\n    return batches\n\n\ndef keeper_wrong(decided):\n    \"\"\"Keep the last copy of duplicated bytes instead of the first.\"\"\"\n    groups = {}\n    for index, (row, _action, _n) in enumerate(decided):\n        if not row[\"drop\"]:\n            groups.setdefault(row[\"h\"], []).append(index)\n    swapped = list(decided)\n    for indexes in groups.values():\n        # a group whose last copy files elsewhere than its first (other slug or date), so the mistake shows\n        if len(indexes) > 1 and decided[indexes[-1]][0][\"base\"] != decided[indexes[0]][0][\"base\"]:\n            first, last = indexes[0], indexes[-1]\n            swapped[first] = (decided[first][0], \"delete\", None)\n            last_row = decided[last][0]\n            same_base = sum(1 for row, action, _n in swapped[:last] if action == \"move\" and row[\"base\"] == last_row[\"base\"])\n            swapped[last] = (last_row, \"move\", same_base + 1)\n            return swapped\n    raise RuntimeError(\"no duplicated bytes filed elsewhere by another copy: keeper_wrong needs one\")\n\n\ndef duplicate_kept(decided):\n    \"\"\"Move a duplicate copy as well, as if it were a file of its own.\"\"\"\n    seen = set()\n    for index, (row, action, _n) in enumerate(decided):\n        if row[\"drop\"]:\n            continue\n        if row[\"h\"] in seen and action == \"delete\":\n            same_base = sum(1 for other, act, _x in decided[:index] if act == \"move\" and other[\"base\"] == row[\"base\"])\n            changed = list(decided)\n            changed[index] = (row, \"move\", same_base + 1)\n            return changed\n        seen.add(row[\"h\"])\n    raise RuntimeError(\"no duplicate copy among the rows: duplicate_kept needs one\")\n\n\ndef rank_swapped(decided):\n    \"\"\"Two files that share a base get each other's numbers.\"\"\"\n    by_base = {}\n    for index, (row, action, _n) in enumerate(decided):\n        if action == \"move\":\n            by_base.setdefault(row[\"base\"], []).append(index)\n    for indexes in by_base.values():\n        if len(indexes) >= 2:\n            first, second = indexes[0], indexes[1]\n            changed = list(decided)\n            changed[first] = (decided[first][0], \"move\", decided[second][2])\n            changed[second] = (decided[second][0], \"move\", decided[first][2])\n            return changed\n    raise RuntimeError(\"no two moves share a base: rank_swapped needs a collision\")\n\n\ndef junk_as_move(decided):\n    for index, (row, _action, _n) in enumerate(decided):\n        if row[\"drop\"] in (\"junk\", \"empty\"):\n            changed = list(decided)\n            changed[index] = (row, \"move\", 1)\n            return changed\n    raise RuntimeError(\"no junk or empty row: junk_as_move needs one\")\n\n\ndef decide(outputs, folder, mistake=None):\n    rows = outputs[\"survey\"][\"rows\"]\n    decided = plan_rows(rows)\n    if mistake == \"keeper_wrong\":\n        decided = keeper_wrong(decided)\n    elif mistake == \"duplicate_kept\":\n        decided = duplicate_kept(decided)\n    elif mistake == \"rank_swapped\":\n        decided = rank_swapped(decided)\n    elif mistake in (\"junk_as_move\", \"fix_errors\"):\n        decided = junk_as_move(decided)\n    batch0, batch1 = calls(folder, decided)\n    if mistake == \"skipped_batch\":\n        batch1 = {\"folder\": folder, \"moves\": [], \"deletes\": []}\n    if mistake == \"out_of_quota\":\n        # one quota row is swapped for a number outside the run's rows: refused, so that row is left\n        beyond = max([row[\"i\"] for row in rows] + [0]) + 1\n        if batch0[\"moves\"]:\n            batch0[\"moves\"][0] = {\"i\": beyond, \"n\": 1}\n        else:\n            batch0[\"deletes\"][0] = beyond\n    outputs[\"batch0\"], outputs[\"batch1\"] = batch0, batch1\n    if mistake == \"fix_errors\":\n        # the one refused item, done right in a third call\n        wrong = next(row for row, _action, _n in decided if row[\"drop\"] in (\"junk\", \"empty\"))\n        outputs[\"fix\"] = {\"folder\": folder, \"moves\": [], \"deletes\": [wrong[\"i\"]]}\n\ndecide(outputs, 'Downloads', None)\n"
+  },
+  {
+   "tool": "apply",
+   "arguments": "$ref:batch0",
+   "save_as": "last"
+  },
+  {
+   "tool": "apply",
+   "arguments": "$ref:batch1",
+   "save_as": "last"
+  },
+  {
+   "tool": "submit",
+   "arguments": "$ref:last.summary"
   }
+ ],
+ "answer": "Done.",
+ "expect": {
+  "valid": true,
+  "score_min": 1.0
+ }
 }

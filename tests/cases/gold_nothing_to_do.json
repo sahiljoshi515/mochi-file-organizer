@@ -1,0 +1,26 @@
+{
+ "note": "a whole agent folder organized by 2 earlier runs: nothing to do",
+ "task": "organize-folder",
+ "arguments": {
+  "folder": "."
+ },
+ "agent_folder": "folders/organized-whole.tar.gz",
+ "steps": [
+  {
+   "tool": "survey",
+   "arguments": {
+    "folder": "."
+   },
+   "save_as": "survey"
+  },
+  {
+   "tool": "submit",
+   "arguments": "$ref:survey.summary"
+  }
+ ],
+ "answer": "Done.",
+ "expect": {
+  "valid": true,
+  "score_min": 1.0
+ }
+}

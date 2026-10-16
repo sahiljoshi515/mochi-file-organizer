@@ -8,146 +8,143 @@ from slimconfig import Output
 
 
 class Tool(Enum):
-    PIN_INVENTORY = "pin_inventory"
-    UNPACK_INBOX = "unpack_inbox"
-    READ_RULES = "read_rules"
-    INVENTORY = "inventory"
-    APPLY_PLAN = "apply_plan"
-    LIST_TREE = "list_tree"
+    PIN_LAYOUT = "pin_layout"
+    SURVEY = "survey"
+    APPLY = "apply"
 
 
 class Task(Enum):
-    ORGANIZE = "organize"
+    ORGANIZE_FOLDER = "organize-folder"
 
 
-class Size(Enum):
-    SMALL = "small"
-    MEDIUM = "medium"
-    LARGE = "large"
+class Drop(Enum):
+    JUNK = "junk"
+    EMPTY = "empty"
+    COPY = "copy"
 
 
-ROOT = "The task's folder, relative to the workspace: file-organizer/<seed>-<size>"
-RELATIVE = "A file path relative to root, e.g. inbox/Photos/IMG_0042.JPG"
-SHA256 = "The file's SHA-256 hex digest"
+class Action(Enum):
+    STAY = "stay"
+    MOVE = "move"
+    DELETE = "delete"
+
+
+class Reason(Enum):
+    IN_PLACE = "in-place"
+    RULES = "rules"
+    JUNK = "junk"
+    EMPTY = "empty"
+    COPY = "copy"
+
+
+class DateSource(Enum):
+    EXIF = "exif"
+    PNG_TEXT = "png-text"
+    PDF = "pdf"
+    OFFICE = "office"
+    ODF = "odf"
+    MVHD = "mvhd"
+    FRONT_MATTER = "front-matter"
+    NAME = "name"
+    NONE = "none"
+
+
+FOLDER = (
+    "The folder to organize, relative to your File Organizer agent folder (home/<you>/agent/file-organizer/),"
+    " e.g. Downloads; . for the whole agent folder"
+)
+RELATIVE = "A path relative to the folder"
 
 
 @dataclass
 class OrganizeInput(Output):
-    seed: Annotated[int, "Which messy folder to make: the same seed and size always give the same files"]
-    size: Annotated[Size, "How many files: small 45, medium 150, large 300"]
+    folder: Annotated[str, FOLDER]
 
 
 @dataclass
-class ExpectedFile(Output):
-    sha256: Annotated[str, SHA256]
-    path: Annotated[str, "Where the rules put it: organized/<category>/<YYYY>/<YYYY-MM-DD>_<slug>.<ext>"]
+class OrganizeOutput(Output):
+    folder: Annotated[str, "The folder organized, as the task named it"]
+    files: Annotated[int, "How many files took part (hidden ones never do)"]
+    moved: Annotated[int, "How many files this run moved to their place"]
+    deleted: Annotated[int, "How many duplicates, junk and empty files this run deleted"]
+    stayed: Annotated[int, "How many files were already in place"]
+    left: Annotated[int, "How many of this run's actions were not done"]
+    remaining: Annotated[int, "How many actions wait for the next run (one run does at most 60)"]
 
 
 @dataclass
-class PinOutput(Output):
-    seed: int
-    size: Size
-    root: Annotated[str, ROOT]
-    files: Annotated[int, "How many files the messy folder holds"]
-    unique: Annotated[int, "How many files stay after deleting duplicates, junk and empty files"]
-    duplicates: Annotated[int, "How many extra copies the rules delete"]
-    removed: Annotated[int, "How many junk and empty files the rules delete"]
-    expected: Annotated[list[ExpectedFile], "Every kept file's hash and final path, sorted by path"]
-
-
-@dataclass
-class RulesInput(Output):
-    pass
-
-
-@dataclass
-class RulesOutput(Output):
-    rules: Annotated[str, "The organizing rules, Markdown"]
-
-
-@dataclass
-class InventoryInput(Output):
-    root: Annotated[str, ROOT]
-    offset: Annotated[int, "Skip this many files (they are sorted by path)"]
-    limit: Annotated[int, "At most this many files, 1 to 100"]
-
-
-@dataclass
-class InventoryFile(Output):
-    i: Annotated[int, "The file's number, the same for the whole task even after it moves: apply_plan names files by it"]
+class Row(Output):
+    i: Annotated[int, "The file's number in the rules' order; apply names files by it"]
     path: Annotated[str, RELATIVE]
-    size: Annotated[int, "Bytes"]
-    sha256: Annotated[str, SHA256]
-    type: Annotated[str, "The content type, sniffed: pdf png jpg docx zip svg html py json log md csv txt bin"]
-    ext: Annotated[str, "The extension the name claims, as written; empty when it has none"]
-    exif: Annotated[str | None, "JPEG EXIF DateTimeOriginal as stored (YYYY:MM:DD HH:MM:SS), or null"]
-    png: Annotated[str | None, "PNG Creation Time text as stored, or null"]
-    pdf: Annotated[str | None, "PDF /CreationDate as stored (D:YYYYMMDD...), or null"]
-    md: Annotated[str | None, "Markdown front-matter date value as written, or null"]
-    mtime_utc: Annotated[str, "Last modification time, YYYY-MM-DDTHH:MM:SSZ"]
+    h: Annotated[str, "The start of the file's sha256: rows with the same h hold the same bytes"]
+    base: Annotated[str | None, "Where the rules file it (relative to the folder), before any _<n> suffix; null for a row with drop"]
+    drop: Annotated[Drop | None, "junk, empty, or copy (the same bytes as a file already in place): delete it; null otherwise"]
 
 
 @dataclass
-class InventoryOutput(Output):
-    root: Annotated[str, ROOT]
-    total: Annotated[int, "How many files the folder holds in all"]
-    next: Annotated[int | None, "The offset of the next page, or null when this was the last"]
-    files: list[InventoryFile]
-
-
-@dataclass
-class UnpackOutput(Output):
-    root: Annotated[str, ROOT]
-    files: Annotated[int, "How many files inbox/ holds now"]
-    dirs: Annotated[int, "How many folders inbox/ holds now"]
-    complete: Annotated[bool, "True when the folder already existed and had been worked on, so it was left as it is; false when it was just made or is still untouched"]
-    note: Annotated[str, "What was done, in a sentence"]
-    rules: Annotated[str, "The organizing rules, Markdown (what read_rules returns)"]
-    inventory: Annotated[InventoryOutput, "The first page of the folder's inventory, at most 100 rows, as inventory returns it; call inventory with its next offset for more"]
+class SurveyOutput(Output):
+    folder: Annotated[str, "The folder"]
+    rows: Annotated[list[Row], "This run's files to act on, at most 60, in order of i"]
+    note: Annotated[str, "What the folder holds and what this run does, in a sentence"]
+    summary: Annotated[OrganizeOutput, "The run so far: submit the last one you get, as it is"]
 
 
 @dataclass
 class Move(Output):
-    i: Annotated[int, "The file's number from inventory"]
-    dst: Annotated[str, "Its new path relative to root, under organized/; must not exist yet"]
+    i: Annotated[int, "The row's i"]
+    n: Annotated[int, "1 + how many earlier rows you are moving with the same base"]
 
 
 @dataclass
-class PlanInput(Output):
-    root: Annotated[str, ROOT]
-    moves: Annotated[list[Move], "Files to move, by number, in order; at most 80 per call"]
-    deletes: Annotated[list[int], "Numbers of the files to delete; at most 80 per call"]
+class ApplyInput(Output):
+    folder: Annotated[str, FOLDER]
+    moves: Annotated[list[Move], "Rows to move to their base (with a _<n> suffix from n 2 on)"]
+    deletes: Annotated[list[int], "The i of every row to delete"]
 
 
 @dataclass
-class PlanOutput(Output):
-    moved: int
-    deleted: int
-    removed_dirs: Annotated[int, "Empty folders pruned under inbox/"]
-    errors: Annotated[list[str], "Each move or delete that failed, with why; every other one was applied"]
+class ApplyOutput(Output):
+    applied: Annotated[int, "How many of this call's moves and deletes were done"]
+    errors: Annotated[list[str], "Each move or delete that was refused, with why; the others were done"]
+    summary: Annotated[OrganizeOutput, "The run so far: submit the last one you get, as it is"]
 
 
 @dataclass
-class TreeInput(Output):
-    root: Annotated[str, ROOT]
-    max_entries: Annotated[int, "At most this many entries, 1 to 200"]
+class PinnedFile(Output):
+    i: Annotated[int, "The file's place in the rules' order"]
+    path: Annotated[str, RELATIVE]
+    size: Annotated[int, "Bytes"]
+    sha256: Annotated[str, "The file's SHA-256 hex digest"]
+    type: Annotated[str, "The sniffed type: the folder below the group"]
+    group: Annotated[str, "documents, images, audio, video, spreadsheets, presentations, data, code, archives or other"]
+    ext: Annotated[str, "The extension the rules give it"]
+    date_source: Annotated[DateSource, "Where its date came from"]
+    date_raw: Annotated[str | None, "The date value as stored, or the name it came from; null when undated"]
+    date: Annotated[str | None, "YYYY-MM-DD, or null when undated"]
+    slug: Annotated[str, "Its slug"]
+    base: Annotated[str | None, "Its base path; null for junk and empty files"]
+    junk: Annotated[bool, "Whether its name is junk"]
+    conforming: Annotated[bool, "Whether it already sits at its base path or a _<n> form of it"]
+    action: Annotated[Action, "What the rules do with it"]
+    reason: Annotated[Reason, "Why"]
+    copy_of: Annotated[int | None, "For a copy: the i of the file kept"]
+    target: Annotated[str | None, "Where it ends: its own path when it stays, the move's destination, null when deleted"]
+    quota: Annotated[bool, "Whether this run acts on it (the first 60 actions)"]
 
 
 @dataclass
-class TreeOutput(Output):
-    root: Annotated[str, ROOT]
-    files: Annotated[int, "How many files the folder holds"]
-    dirs: Annotated[int, "How many folders"]
-    entries: Annotated[list[str], "Paths relative to root, sorted; a folder ends with /"]
-    truncated: Annotated[bool, "Whether entries stop before the end"]
+class PinOutput(Output):
+    folder: Annotated[str, "The folder"]
+    files: Annotated[list[PinnedFile], "Every file that takes part, in order"]
+    taken: Annotated[list[str], "Every path that existed under organized/ when the run started"]
+    pending: Annotated[int, "How many actions the folder needs in all"]
+    quota: Annotated[int, "How many of them this run does"]
+    entries_after: Annotated[int, "How many files and folders the agent folder holds after this run"]
 
 
 TOOLS = {
-    Tool.PIN_INVENTORY: (OrganizeInput, PinOutput),
-    Tool.UNPACK_INBOX: (OrganizeInput, UnpackOutput),
-    Tool.READ_RULES: (RulesInput, RulesOutput),
-    Tool.INVENTORY: (InventoryInput, InventoryOutput),
-    Tool.APPLY_PLAN: (PlanInput, PlanOutput),
-    Tool.LIST_TREE: (TreeInput, TreeOutput),
+    Tool.PIN_LAYOUT: (OrganizeInput, PinOutput),
+    Tool.SURVEY: (OrganizeInput, SurveyOutput),
+    Tool.APPLY: (ApplyInput, ApplyOutput),
 }
-TASKS = {Task.ORGANIZE: OrganizeInput}
+TASKS = {Task.ORGANIZE_FOLDER: (OrganizeInput, OrganizeOutput)}

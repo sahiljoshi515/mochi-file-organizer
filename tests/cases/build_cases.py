@@ -1,79 +1,176 @@
-"""Writes the scripted cases next to this file: gold cases per size and one case per deliberate
-mistake (see plan_from_inventory.VARIANTS). The small cases follow the hosted path exactly:
-unpack_inbox (which returns the inventory), then apply_plan by number ranges (gold_small: three
-calls for i 0-14, 15-29, 30-44; gold_small_one_call: everything at once). The large case also
-exercises read_rules, inventory and list_tree. Run: python tests/cases/build_cases.py"""
+"""Writes the scripted cases (tests/cases/*.json) and the agent folders they unpack
+(tests/cases/folders/*.tar.gz), deterministically:
+
+    uv run python tests/cases/build_cases.py
+
+Every case runs the organize-folder task through NanoAgent's real task runner with a scripted agent
+(~/mochi-dev/harness/scripted_task.py, or tests/test_cases.py without NanoAgent): survey, a python step
+that decides the rows by the instructions (tests/cases/agent.py, inlined), apply in calls of 30, submit.
+Gold cases must be valid with score 1.0; each wrong case makes one mistake and must be invalid with the
+message of the first constraint it breaks.
+"""
 
 from __future__ import annotations
 
+import gzip
 import json
+import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-STEP = (
-    "import importlib.util, sys\n"
-    "from pathlib import Path\n"
-    "words = [w for w in sys.argv[1:] if not w.startswith('-')]\n"
-    "case = next(Path(w) for w in words if w.endswith('.json')).resolve()\n"
-    "spec = importlib.util.spec_from_file_location('plan_from_inventory', case.parent / 'plan_from_inventory.py')\n"
-    "helper = importlib.util.module_from_spec(spec)\n"
-    "spec.loader.exec_module(helper)\n"
-    "for index, batch in enumerate(helper.harness_plan(outputs, ['start', 'inv0', 'inv1', 'inv2'], {variant!r}, {batches}, {by_number})):\n"
-    "    outputs[f'batch{{index}}'] = batch\n"
-)
-EXPECT = {
-    "gold": {"valid": True, "score_min": 1.0},
-    "duplicates_moved": {"valid": False, "message_contains": "duplicate"},
-    "near_deleted": {"valid": False, "message_contains": "missing"},
-    "ext_typing": {"valid": False, "message_contains": "misplaced"},
-    "keeper_latest": {"valid": False, "message_contains": "misplaced"},
-    "collision_by_name": {"valid": False, "message_contains": "misplaced"},
-    "junk_kept": {"valid": False, "message_contains": "other file"},
-    "empty_kept": {"valid": False, "message_contains": "other file"},
-    "inbox_left": {"valid": False, "message_contains": "left outside"},
-    "name_date_first": {"valid": False, "message_contains": "misplaced"},
-}
-PAGE = 100
-# inventory calls after unpack_inbox's own first page: none for small; medium and large page on.
-PAGES = {"small": 0, "medium": 2, "large": 3}
-# apply_plan calls per case: each takes at most 80 moves and 80 deletes; a small plan fits one.
-BATCHES = {"small": 1, "medium": 2, "large": 3}
-# The hosted path for small: three calls, for the files numbered 0-14, 15-29 and 30-44.
-SMALL_CUTS = [15, 30]
+ROOT = HERE.parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / "tests")]
+
+from flow import agent, organize_fully, plain_rows, tree
+from messy import messy, organized_folder, unpack, write_tar
+
+from contract import OrganizeInput
+from plugin import organizer
+
+AGENT = (HERE / "agent.py").read_text(encoding="utf-8")
+FOLDERS = HERE / "folders"
 
 
-def case(seed: int, size: str, variant: str, by_number: list[int] | None = None) -> dict:
-    steps = [{"tool": "unpack_inbox", "arguments": {"seed": seed, "size": size}, "save_as": "start"}]
-    if size == "large":
-        steps.append({"tool": "read_rules", "arguments": {}})
-    for page in range(PAGES[size]):
-        steps.append({"tool": "inventory", "arguments": {"root": "$ref:start.root", "offset": PAGE * page, "limit": PAGE}, "save_as": f"inv{page}"})
-    count = len(by_number) + 1 if by_number is not None else BATCHES[size]
-    steps.append({"python": STEP.format(variant=variant, batches=count, by_number=by_number)})
-    for batch in range(count):
-        steps.append({"tool": "apply_plan", "arguments": {"root": "$ref:start.root", "moves": f"$ref:batch{batch}.moves", "deletes": f"$ref:batch{batch}.deletes"}, "save_as": f"applied{batch}"})
-    if size == "large":
-        steps.append({"tool": "list_tree", "arguments": {"root": "$ref:start.root", "max_entries": 200}})
-    answer = {
-        "gold": "Deleted every junk, empty and duplicate file and moved every other file to organized/ by the rules.",
-    }.get(variant, f"Tidied the folder ({variant.replace('_', ' ')}).")
-    return {"task": "organize", "arguments": {"seed": seed, "size": size}, "steps": steps, "answer": answer, "expect": EXPECT[variant]}
+def rows_for(files: dict[str, bytes], folder: str) -> list[dict]:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        unpack(files, workspace)
+        organizer.RUN = None
+        survey = organizer.survey(OrganizeInput(folder=folder), workspace)
+        organizer.RUN = None
+        return plain_rows(survey), survey.summary
 
 
-def main() -> None:
-    cases = {
-        "gold_small": case(1, "small", "gold", by_number=SMALL_CUTS),
-        "gold_small_one_call": case(1, "small", "gold"),
-        "gold_medium": case(1, "medium", "gold"),
-        "gold_large": case(2, "large", "gold"),
-    }
-    for variant in EXPECT:
-        if variant != "gold":
-            cases[f"wrong_{variant}"] = case(1, "small", variant)
-    for name, content in cases.items():
-        (HERE / f"{name}.json").write_text(json.dumps(content, indent=2) + "\n", encoding="utf-8")
-        print("wrote", name)
+def suits(rows: list[dict]) -> bool:
+    """A folder every wrong case can be made on: duplicates among the rows, a collision, junk."""
+    decided = agent().plan_rows(rows)
+    bases = [row["base"] for row, action, _n in decided if action == "move"]
+    copies = sum(1 for row, action, _n in decided if action == "delete" and not row["drop"])
+    try:
+        agent().keeper_wrong(decided)
+    except RuntimeError:
+        return False
+    return copies >= 1 and len(bases) != len(set(bases)) and any(row["drop"] in ("junk", "empty") for row in rows)
+
+
+def pick(profile: str, folder: str, one_run: bool) -> tuple[int, dict[str, bytes]]:
+    for seed in range(1, 400):
+        files = messy(seed, profile, folder)
+        rows, summary = rows_for(files, folder)
+        if suits(rows) and (summary.remaining == 0) == one_run:
+            return seed, files
+    raise SystemExit(f"no seed suits {profile}")
+
+
+def save_folder(name: str, files: dict[str, bytes]) -> str:
+    plain = FOLDERS / f"{name}.tar"
+    write_tar(files, plain)
+    packed = FOLDERS / f"{name}.tar.gz"
+    with gzip.GzipFile(packed, "wb", mtime=0, compresslevel=9) as out:
+        out.write(plain.read_bytes())
+    plain.unlink()
+    return f"folders/{name}.tar.gz"
+
+
+def root_code(folder: str) -> str:
+    return "workspace" if folder == "." else f"workspace / {folder!r}"
+
+
+def steps(folder: str, mistake: str | None = None, after: str | None = None, submit: str | dict = "$ref:last.summary") -> list[dict]:
+    flow = [
+        {"tool": "survey", "arguments": {"folder": folder}, "save_as": "survey"},
+        {"python": AGENT + f"\ndecide(outputs, {folder!r}, {mistake!r})\n"},
+        {"tool": "apply", "arguments": "$ref:batch0", "save_as": "last"},
+        {"tool": "apply", "arguments": "$ref:batch1", "save_as": "last"},
+    ]
+    if mistake == "fix_errors":
+        flow.append({"tool": "apply", "arguments": "$ref:fix", "save_as": "last"})
+    if after:
+        flow.append({"python": after})
+    flow.append({"tool": "submit", "arguments": submit})
+    return flow
+
+
+def moved_file(folder: str, body: str) -> str:
+    """Python run after the applies, with `target` and `source` bound to one applied move's paths."""
+    return (
+        "state = json.loads((workspace / '.file-organizer' / 'state.json').read_text())\n"
+        "move = next(entry for entry in state['applied'] if entry['kind'] == 'move')\n"
+        f"root = {root_code(folder)}\n"
+        "target, source = root / move['to'], root / move['from']\n" + body
+    )
+
+
+def case(note: str, folder: str, agent_folder: str, flow: list[dict], expect: dict, **extra) -> dict:
+    return {"note": note, "task": "organize-folder", "arguments": {"folder": folder}, "agent_folder": agent_folder, **extra, "steps": flow, "answer": "Done.", "expect": expect}
+
+
+GOLD = {"valid": True, "score_min": 1.0}
+
+
+def wrong(contains: str) -> dict:
+    return {"valid": False, "score_max": 0.99, "message_contains": contains}
+
+
+def main() -> int:
+    FOLDERS.mkdir(exist_ok=True)
+    for old in list(HERE.glob("*.json")) + list(FOLDERS.glob("*.tar.gz")):
+        old.unlink()
+    cases: dict[str, dict] = {}
+
+    seed, small = pick("small", "Downloads", one_run=True)
+    small_tar = save_folder("small", small)
+    cases["gold_small"] = case(f"messy(seed={seed}, small): one run does everything", "Downloads", small_tar, steps("Downloads"), GOLD)
+    cases["gold_scrambled_mtimes"] = case("the same folder with random modification times: the rules never read them", "Downloads", small_tar, steps("Downloads"), GOLD, mtimes="scrambled")
+    hidden_check = (
+        "root = workspace / 'Downloads'\n"
+        "assert (root / '.git' / 'HEAD').read_bytes() == b'ref: refs/heads/main\\n'\n"
+        "assert (root / '.vscode' / 'settings.json').read_bytes() == b'{\"editor.tabSize\": 2}\\n'\n"
+        "assert (root / '.hidden-note.txt').read_bytes() == b'leave me alone\\n'\n"
+        "assert (workspace / 'Notes' / 'keep me.txt').is_file()\n"
+    )
+    cases["gold_hidden_untouched"] = case("hidden files and files outside the folder are left exactly as they were", "Downloads", small_tar, steps("Downloads", after=hidden_check), GOLD)
+    cases["gold_fix_errors"] = case("a junk row is first given as a move (refused), then deleted in a third call", "Downloads", small_tar, steps("Downloads", "fix_errors"), GOLD)
+    stale = dict(small)
+    stale[".file-organizer/state.json"] = json.dumps({"version": 1, "token": "0" * 32, "folder": "Downloads", "hash_length": 12, "taken": [], "rows": [], "applied": [{"i": 0, "kind": "delete", "path": "x", "call": 1}], "calls": 1, "summary": {}}).encode()
+    cases["gold_stale_state"] = case("an earlier run's state file is in the agent folder: this run ignores and replaces it", "Downloads", save_folder("small-stale-state", stale), steps("Downloads"), GOLD)
+
+    incremental = organized_folder(3, "Photos")
+    cases["gold_incremental"] = case("an organized folder from an earlier run (files in place, a gap, a misfiled one) plus new files", "Photos", save_folder("incremental", incremental), steps("Photos"), GOLD)
+
+    seed_multi, multi = pick("multirun", "Downloads", one_run=False)
+    multi_tar = save_folder("multirun", multi)
+    cases["gold_multirun_1of3"] = case(f"messy(seed={seed_multi}, multirun): this run does the first 60 actions; the rest wait", "Downloads", multi_tar, steps("Downloads"), GOLD)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        unpack(messy(11, "small", "."), workspace)
+        runs = organize_fully(workspace, ".")
+        done = {path: data for path, data in tree(workspace).items() if not path.startswith(".file-organizer/")}
+    cases["gold_nothing_to_do"] = case(f"a whole agent folder organized by {runs} earlier runs: nothing to do", ".", save_folder("organized-whole", done), [{"tool": "survey", "arguments": {"folder": "."}, "save_as": "survey"}, {"tool": "submit", "arguments": "$ref:survey.summary"}], GOLD)
+
+    whole = messy(23, "small", ".")
+    cases["gold_whole_agent_folder"] = case("folder . : the whole agent folder", ".", save_folder("whole", whole), steps("."), GOLD)
+
+    cases["wrong_keeper_wrong"] = case("the last copy of duplicated bytes is kept instead of the first", "Downloads", small_tar, steps("Downloads", "keeper_wrong"), wrong("not where the rules put them"))
+    cases["wrong_duplicate_kept"] = case("a duplicate copy is moved as a file of its own", "Downloads", small_tar, steps("Downloads", "duplicate_kept"), wrong("should not be"))
+    cases["wrong_rank_swapped"] = case("two files sharing a base get each other's numbers", "Downloads", small_tar, steps("Downloads", "rank_swapped"), wrong("not where the rules put them"))
+    cases["wrong_skipped_batch"] = case("the second call is never made", "Downloads", small_tar, steps("Downloads", "skipped_batch"), wrong("checks failed"))
+    cases["wrong_junk_as_move"] = case("a junk row is given as a move (refused) and never deleted", "Downloads", small_tar, steps("Downloads", "junk_as_move"), wrong("still there"))
+    fabricate = "outputs['fake'] = dict(outputs['last']['summary'], moved=outputs['last']['summary']['moved'] + 1)\n"
+    cases["wrong_fabricated_summary"] = case("the submitted summary claims one more move than happened", "Downloads", small_tar, steps("Downloads", after=fabricate, submit="$ref:fake"), wrong("The submitted summary says"))
+    cases["wrong_tamper_after_apply"] = case("a moved file's bytes are changed behind the tools' back", "Downloads", small_tar, steps("Downloads", after=moved_file("Downloads", "target.write_bytes(b'tampered')\n")), wrong("are gone"))
+    cases["wrong_stray_file"] = case("a file the rules never made appears in the folder", "Downloads", small_tar, steps("Downloads", after="(workspace / 'Downloads' / 'stray.txt').write_text('not from the rules')\n"), wrong("should not be"))
+    cases["wrong_copied_not_moved"] = case("a moved file is also copied back to where it was", "Downloads", small_tar, steps("Downloads", after=moved_file("Downloads", "source.parent.mkdir(parents=True, exist_ok=True)\nsource.write_bytes(target.read_bytes())\n")), wrong("should not be"))
+    cases["wrong_out_of_quota"] = case("a number outside this run's rows is used in place of a row, which is left undone", "Downloads", multi_tar, steps("Downloads", "out_of_quota"), wrong("checks failed"))
+
+    for name, data in cases.items():
+        (HERE / f"{name}.json").write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    sizes = sum(path.stat().st_size for path in FOLDERS.glob("*.tar.gz"))
+    print(f"wrote {len(cases)} cases; folders {sizes} bytes")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

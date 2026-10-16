@@ -1,73 +1,98 @@
-"""apply_plan: shapes on the way in; on the way out, every item it did not report as failed has
-happened on disk, as the folder's numbers record shows."""
+"""RULES.md §5: the order, the plan and one run's quota. Shared, byte for byte, by src/plugin/ and
+verifier/.
+"""
 
-from pathlib import Path
+from __future__ import annotations
 
-from .checks import read_ledger, relative_problem, result, root_problem
-from .rules import ORGANIZED
+from dataclasses import dataclass
 
-MAX_MOVES = 80
-MAX_DELETES = 80
+from .naming import path_key, suffixed
+from .walk import Facts
+
+QUOTA = 60
+STAY, MOVE, DELETE = "stay", "move", "delete"
+IN_PLACE, RULES, JUNK, EMPTY, COPY = "in-place", "rules", "junk", "empty", "copy"
+MAX_NUMBER = 999
 
 
-def destination_problem(path):
-    problem = relative_problem("dst", path)
-    if problem:
-        return problem
-    if not path.startswith(ORGANIZED + "/"):
-        return f"dst must be a file path under {ORGANIZED}/"
+@dataclass(frozen=True)
+class Step:
+    """What the rules do with one file: `i` is its place in the order."""
+
+    i: int
+    path: str
+    sha256: str
+    action: str
+    reason: str
+    copy_of: int | None
+    target: str | None  # where it ends up: its own path for a stay, the move's destination, None for a delete
+    quota: bool
+
+
+def ordered(facts: list[Facts]) -> list[Facts]:
+    """Conforming files first, then the others, each part by path in code-point order."""
+    return sorted(facts, key=lambda fact: (not fact.conforming, fact.path))
+
+
+def plan(facts: list[Facts], taken: list[str]) -> list[Step]:
+    """Every file's step, in order. `taken` is every path that exists in the folder when the run starts."""
+    claimed = {path_key(path) for path in taken}
+    kept: dict[str, int] = {}
+    steps: list[Step] = []
+    pending = 0
+    for index, fact in enumerate(ordered(facts)):
+        if fact.junk:
+            action, reason, copy_of, target = DELETE, JUNK, None, None
+        elif fact.size == 0:
+            action, reason, copy_of, target = DELETE, EMPTY, None, None
+        elif fact.sha256 in kept:
+            action, reason, copy_of, target = DELETE, COPY, kept[fact.sha256], None
+        elif fact.conforming:
+            kept[fact.sha256] = index
+            action, reason, copy_of, target = STAY, IN_PLACE, None, fact.path
+        else:
+            kept[fact.sha256] = index
+            target = first_free(fact.base, fact.ext, claimed)
+            claimed.add(path_key(target))
+            action, reason, copy_of = MOVE, RULES, None
+        in_quota = action != STAY and pending < QUOTA
+        if action != STAY:
+            pending += 1
+        steps.append(Step(index, fact.path, fact.sha256, action, reason, copy_of, target, in_quota))
+    return steps
+
+
+def first_free(base: str, ext: str, claimed: set[str]) -> str:
+    number = 1
+    while path_key(suffixed(base, ext, number)) in claimed:
+        number += 1
+    return suffixed(base, ext, number)
+
+
+def nth_free(base: str, ext: str, claimed: set[str], n: int) -> str | None:
+    """The n-th name of `base`, `base_2`, ... that is not claimed (n from 1), or None past MAX_NUMBER."""
+    number = 0
+    while number < MAX_NUMBER:
+        number += 1
+        name = suffixed(base, ext, number)
+        if path_key(name) not in claimed:
+            n -= 1
+            if n == 0:
+                return name
     return None
 
 
-def verify_input(value):
-    problem = root_problem(value.root)
-    if problem:
-        return result(False, problem)
-    if len(value.moves) > MAX_MOVES or len(value.deletes) > MAX_DELETES:
-        return result(False, f"at most {MAX_MOVES} moves and {MAX_DELETES} deletes per call: apply the plan in batches")
-    numbers = [move.i for move in value.moves] + list(value.deletes)
-    if any(number < 0 for number in numbers):
-        return result(False, "file numbers are 0 or more")
-    if len(set(numbers)) != len(numbers):
-        return result(False, "a file number is used twice")
-    for move in value.moves:
-        problem = destination_problem(move.dst)
-        if problem:
-            return result(False, problem)
-    destinations = [move.dst for move in value.moves]
-    if len(set(destinations)) != len(destinations):
-        return result(False, "two moves share a destination")
-    return result(True, "input is valid")
+def hash_length(facts: list[Facts]) -> int:
+    """The shortest prefix (12 hex digits or more, in steps of 4) that tells every distinct content apart."""
+    digests = sorted({fact.sha256 for fact in facts})
+    length = 12
+    while length < 64 and len({digest[:length] for digest in digests}) != len(digests):
+        length += 4
+    return length
 
 
-def failed(errors, label):
-    """Whether an error line is about the item the tool labels `label`."""
-    return any(line.startswith(label) for line in errors)
-
-
-def verify_output(input_value, output_value, workspace):
-    root = Path(workspace) / input_value.root
-    if not root.is_dir():
-        return result(False, f"{input_value.root} is not a folder in the workspace")
-    ledger = read_ledger(workspace, input_value.root)
-    if ledger is None:
-        return result(False, "the folder's file numbers are not recorded")
-    applied_moves = applied_deletes = 0
-    for move in input_value.moves:
-        if failed(output_value.errors, f"move {move.i} -> {move.dst}:"):
-            continue
-        applied_moves += 1
-        if ledger["files"].get(str(move.i)) != move.dst or not (root / move.dst).is_file():
-            return result(False, f"file {move.i} is not at {move.dst} although its move reported no error")
-    for number in input_value.deletes:
-        if failed(output_value.errors, f"delete {number}:"):
-            continue
-        applied_deletes += 1
-        gone = ledger["deleted"].get(str(number))
-        if gone is None or (root / gone).exists():
-            return result(False, f"file {number} still exists although its deletion reported no error")
-    if output_value.moved != applied_moves or output_value.deleted != applied_deletes:
-        return result(False, "the counts of applied moves and deletes do not match the errors reported")
-    if output_value.removed_dirs < 0:
-        return result(False, "a count is negative")
-    return result(True, f"{output_value.moved} moved, {output_value.deleted} deleted", errors=len(output_value.errors))
+def counts(steps: list[Step]) -> dict[str, int]:
+    stays = sum(step.action == STAY for step in steps)
+    pending = len(steps) - stays
+    quota = sum(step.quota for step in steps)
+    return {"files": len(steps), "stayed": stays, "pending": pending, "quota": quota, "remaining": pending - quota}

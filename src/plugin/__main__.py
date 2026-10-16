@@ -13,19 +13,16 @@ from mcp.server.stdio import stdio_server
 from slimconfig import build_output, output_schema, plain_output
 
 from contract import TOOLS, Tool
-from plugin import apply_plan, inventory, list_tree, pin_inventory, read_rules, unpack_inbox
+from plugin import apply, pin_layout, survey
 
 server = Server("file-organizer")
 # NanoAgent names the one folder this plugin may write to.
 WORKSPACE_ENV = "NANOAGENT_WORKSPACE"
 # Each tool's implementation: (its input, the workspace) -> its output, as contract.TOOLS types them.
 IMPLEMENTATIONS = {
-    Tool.PIN_INVENTORY: pin_inventory,
-    Tool.UNPACK_INBOX: unpack_inbox,
-    Tool.READ_RULES: read_rules,
-    Tool.INVENTORY: inventory,
-    Tool.APPLY_PLAN: apply_plan,
-    Tool.LIST_TREE: list_tree,
+    Tool.PIN_LAYOUT: pin_layout,
+    Tool.SURVEY: survey,
+    Tool.APPLY: apply,
 }
 
 

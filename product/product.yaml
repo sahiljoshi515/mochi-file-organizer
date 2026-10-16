@@ -1,11 +1,13 @@
 _ > nanoagent.plugin.manifest.ProductConfig:
-tagline: "Tidy a messy folder: drop exact duplicates, then file and rename everything by the rules"
-summary: "Pick a seed and a size and it makes a messy folder of photos, documents, code and junk, with duplicates hiding under other names. The agent must delete every duplicate, junk and empty file and move everything else to organized/<category>/<year>/<date>_<slug>.<ext> by precise rules, and every file is then checked against the answer key."
+tagline: "Tidy your own folder: drop exact duplicates and junk, then file everything by its content and date"
+summary: "Upload a messy folder of your own files to the agent folder and ask the chat to organize it. The agent deletes exact duplicates, junk and empty files and files everything else under organized/<group>/<type>/<year>/<date>_<name>.<ext>, by rules that read each file's real content and embedded date. A static verifier then checks every file by its hash and path against an answer key pinned before the agent started."
 highlights:
-  - "Real file formats with embedded dates: EXIF, PNG, PDF and Markdown front matter"
-  - "Duplicates are found by content, never by name or size"
-  - "Every file's final path is checked hash by hash"
+  - "About 35 real formats sniffed from their bytes, never from the name: photos, documents, audio, video, archives, data and code"
+  - "Dates from EXIF, PDF, Office and OpenDocument properties, MP4 headers and front matter, else the file name; never modification times"
+  - "Duplicates found by content alone, the last copy of anything is never deleted, and every check is listed in the result"
+  - "One run does up to 60 actions; a bigger folder continues with the same rules when you ask again"
 steps:
-  - "Pick a seed and a size: small (45 files) is designed to take 4 tool calls and the answer, inside the 6 agent steps Mochi's hosted runner allows; medium and large need a runner with a higher step limit, such as your own computer"
-  - "The agent reads the rules, inspects every file and tidies the folder"
-  - "See every file where it belongs, and what went wrong if anything did"
+  - "Upload the files to organize into a folder of your File Organizer agent folder, for example Downloads"
+  - "Ask the chat to organize that folder (or . for the whole agent folder)"
+  - "The agent lists this run's files, decides which copies stay and how names that collide are numbered, then moves and deletes"
+  - "See what happened to every file and every check the verifier made; ask again if more remains"

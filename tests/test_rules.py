@@ -1,277 +1,243 @@
+"""RULES.md in code: the shared modules, name rules, sniffing, embedded dates and the inflater."""
+
 from __future__ import annotations
 
-import ast
-import datetime
-import io
 import random
+import zlib
 from pathlib import Path
 
+import builders
 import pytest
-from PIL import Image
 
-from plugin import generate, rules
+from plugin import formats, inflate, meta, naming, sniff, walk
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED_IMPORTS = {
-    "__future__", "collections", "dataclasses", "decimal", "difflib", "enum", "fractions", "functools", "hashlib",
-    "itertools", "json", "math", "operator", "pathlib", "re", "statistics", "string", "textwrap", "typing", "unicodedata",
-}  # fmt: skip
-FORBIDDEN_NAMES = {"__import__", "breakpoint", "compile", "delattr", "eval", "exec", "getattr", "globals", "input", "locals", "open", "setattr", "vars"}
-FORBIDDEN_ATTRIBUTES = {"builtins", "chmod", "hardlink_to", "mkdir", "os", "rename", "rmdir", "shutil", "socket", "subprocess", "symlink_to", "sys", "touch", "unlink", "write_bytes", "write_text"}
+SHARED = ["naming", "inflate", "formats", "sniff", "meta", "walk", "plan", "layout"]
 
 
-def row(**changes) -> rules.Row:
-    base = {"path": "inbox/a.txt", "size": 1, "sha256": "a" * 64, "type": "txt", "ext": "txt", "exif": None, "png": None, "pdf": None, "md": None, "mtime_utc": "2020-01-02T03:04:05Z"}
-    return rules.Row(**{**base, **changes})
-
-
-def test_the_server_side_rules_are_a_byte_identical_copy() -> None:
-    assert (ROOT / "verifier" / "rules.py").read_bytes() == (ROOT / "src" / "plugin" / "rules.py").read_bytes()
-
-
-def test_the_readme_quotes_the_rules_verbatim() -> None:
-    assert (ROOT / "src" / "plugin" / "RULES.md").read_text(encoding="utf-8") in (ROOT / "README.md").read_text(encoding="utf-8")
-
-
-def test_the_verifier_uses_only_what_a_verifier_may() -> None:
-    for module in sorted((ROOT / "verifier").glob("*.py")):
-        tree = ast.parse(module.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                assert all(alias.name.split(".")[0] in ALLOWED_IMPORTS for alias in node.names), (module.name, ast.dump(node))
-            elif isinstance(node, ast.ImportFrom) and node.level == 0:
-                assert (node.module or "").split(".")[0] in ALLOWED_IMPORTS | {"contract"}, (module.name, node.module)
-            elif isinstance(node, ast.Name):
-                assert node.id not in FORBIDDEN_NAMES, (module.name, node.id)
-            elif isinstance(node, ast.Attribute):
-                assert node.attr not in FORBIDDEN_ATTRIBUTES and not node.attr.startswith("_"), (module.name, node.attr)
-
-
-def test_utc_stamp_agrees_with_datetime() -> None:
-    rng = random.Random(7)
-    samples = [0, 86399, 86400, 951782400, 951868800, 4107456000, 1709164800] + [rng.randint(0, 4_000_000_000) for _ in range(5000)]
-    for seconds in samples:
-        want = datetime.datetime.fromtimestamp(seconds, datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        assert rules.utc_stamp(seconds) == want
-
-
-@pytest.mark.parametrize("kind", generate.KINDS)
-def test_every_generated_kind_sniffs_as_itself(kind: str) -> None:
-    meta = {"exif": "2019:07:14 10:22:31", "png": "2019-07-14T10:22:31Z", "pdf": "D:20190714102231Z", "md": "2019-07-14"}
-    for draw in range(6):
-        assert rules.sniff(generate.content(kind, "id00001", meta, draw)) == kind
-        assert rules.sniff(generate.content(kind, "id00002", {}, draw)) == kind
+def test_the_verifier_holds_byte_identical_copies_of_the_rules() -> None:
+    for name in SHARED:
+        assert (ROOT / "src" / "plugin" / f"{name}.py").read_bytes() == (ROOT / "verifier" / f"{name}.py").read_bytes(), name
 
 
 @pytest.mark.parametrize(
-    ("data", "kind"),
-    [
-        (b"", "txt"),
-        (b"\xff\xfe\x00bytes", "bin"),
-        (b"text with a \x00 byte", "bin"),
-        (b'<?xml version="1.0"?>\n<svg xmlns="x"></svg>', "svg"),
-        (b"  <SVG>", "svg"),
-        (b"<!doctype HTML>", "html"),
-        (b"<html lang='en'>", "html"),
-        (b"<htmlx>", "txt"),
-        (b"#!/usr/bin/python\nprint(1)\n", "py"),
-        (b"#!/bin/sh\necho\n", "txt"),
-        (b'{"a": 1}', "json"),
-        (b"[1, 2]", "json"),
-        (b"42", "txt"),
-        (b"{not json", "txt"),
-        (b"2021-03-04 05:06:07 INFO x", "log"),
-        (b"2021-03-04T05:06:07Z INFO x", "log"),
-        (b"# Title\n", "md"),
-        (b"#Title\n", "txt"),
-        (b"---\ndate: 2019-07-14\n---\n", "md"),
-        (b"a,b\nc,d\ne,f\n", "csv"),
-        (b"a,b\nc,d\n", "txt"),
-        (b"a,b\nc,d,e\nf,g\n", "txt"),
-        (b"a\nb\nc\n", "txt"),
-        (b"%PDF-1.4 junk", "pdf"),
-        (b"\x89PNG\r\n\x1a\nrest", "png"),
-        (b"\xff\xd8\xffrest", "jpg"),
-    ],
+    ("name", "ext"),
+    [("photo.JPG", "jpg"), ("a.tar.gz", "gz"), (".bashrc", ""), ("README", ""), ("x.", ""), ("x.toolongextension", ""), ("x.ab-c", ""), ("x.Ｐdf", "")],
 )
-def test_sniffing_edge_cases(data: bytes, kind: str) -> None:
-    assert rules.sniff(data) == kind
+def test_claimed_extension(name: str, ext: str) -> None:
+    assert naming.claimed_ext(name) == ext
 
 
-def test_a_zip_without_a_word_document_is_a_zip() -> None:
-    assert rules.sniff(generate.zip_bytes([("a.txt", b"x")])) == "zip"
-    assert rules.sniff(generate.docx_bytes("hello")) == "docx"
-    assert "word/document.xml" in rules.zip_names(generate.docx_bytes("hello"))
-    assert rules.zip_names(b"PK\x03\x04 truncated") == []
+@pytest.mark.parametrize("name", [".DS_Store", "thumbs.DB", "Desktop.ini", "Icon\r", "._IMG_1.jpg", "~$report.docx", ".~lock.notes.odt#", "file.TMP", "a.part", "x.crdownload"])
+def test_junk_names(name: str) -> None:
+    assert naming.is_junk(name) and not naming.is_hidden(name)
 
 
-def test_exif_reader_agrees_with_pillow() -> None:
-    for fixture in generate.FIXTURES:
-        data = generate.jpeg_bytes(fixture, "2019:07:14 10:22:31", "id00001")
-        assert rules.exif_datetime(data) == "2019:07:14 10:22:31"
-        assert Image.open(io.BytesIO(data)).getexif().get_ifd(0x8769)[0x9003] == "2019:07:14 10:22:31"
-        assert rules.exif_datetime(generate.jpeg_bytes(fixture, None, "id00001")) is None
-
-
-def test_png_pdf_and_front_matter_readers() -> None:
-    png = generate.png_bytes(3, 2, (1, 2, 3), "Sun, 14 Jul 2019 10:22:31 GMT", "id00001")
-    assert rules.png_creation_time(png) == "Sun, 14 Jul 2019 10:22:31 GMT"
-    assert rules.png_creation_time(generate.png_bytes(3, 2, (1, 2, 3), None, "id00001")) is None
-    assert Image.open(io.BytesIO(png)).size == (3, 2)
-    assert rules.pdf_creation_date(generate.pdf_bytes("T", "x", "D:20190714102231+02'00'")) == "D:20190714102231+02'00'"
-    assert rules.pdf_creation_date(generate.pdf_bytes("T", "x", None)) is None
-    assert rules.frontmatter_date("---\ntitle: a\ndate: \"2019-07-14\"\n---\n# a\n") == '"2019-07-14"'
-    assert rules.frontmatter_date("---\ntitle: a\n---\ndate: 2019-07-14\n") is None
-    assert rules.frontmatter_date("# a\ndate: 2019-07-14\n") is None
+def test_hidden_names_are_the_dot_names_that_are_not_junk() -> None:
+    assert naming.is_hidden(".git") and naming.is_hidden(".env") and not naming.is_hidden("a.git")
 
 
 @pytest.mark.parametrize(
-    ("changes", "date"),
+    ("stem", "date"),
     [
-        ({"exif": "2019:07:14 10:22:31"}, "2019-07-14"),
-        ({"png": "Sun, 14 Jul 2019 10:22:31 GMT"}, "2019-07-14"),
-        ({"png": "2019-07-14T10:22:31Z"}, "2019-07-14"),
-        ({"pdf": "D:20190714102231+02'00'"}, "2019-07-14"),
-        ({"pdf": "D:20190714"}, "2019-07-14"),
-        ({"md": "'2019-07-14'"}, "2019-07-14"),
-        ({"md": "2019-07-14T10:22:31Z"}, "2019-07-14"),
-        ({"md": "14 July 2019"}, None),
-        ({"exif": "2019:13:14 10:22:31"}, None),
-        ({"png": "31 Apr 2019 10:22:31 GMT"}, None),
-        ({"exif": "2019:13:14 10:22:31", "png": "2018-01-01T00:00:00Z"}, "2018-01-01"),
+        ("IMG_20180305_120102", "2018-03-05"),
+        ("Photo 2019-07-14 10.22.31", "2019-07-14"),
+        ("scan 2019.07.14", "2019-07-14"),
+        ("2019-07_14", None),  # the two separators differ
+        ("receipt 20210229", None),  # not a leap year
+        ("old 19850601", None),  # before 1990
+        ("future 20400101", None),  # after 2039
+        ("id 1201907145", None),  # touching other digits
+        ("٢٠١٩-٠٧-١٤", None),  # Unicode digits are not digits here
+        ("first 2019-13-45 then 2020-01-02", "2020-01-02"),
     ],
 )
-def test_embedded_dates(changes: dict, date: str | None) -> None:
-    assert rules.embedded_date(row(**changes)) == date
-
-
-def test_date_precedence_embedded_then_name_then_mtime() -> None:
-    assert rules.file_date(row(path="inbox/x/IMG_2018-01-01.jpg", exif="2019:07:14 10:22:31")) == "2019-07-14"
-    assert rules.file_date(row(path="inbox/x/IMG_2018-01-01.jpg", exif="2019:13:14 10:22:31")) == "2018-01-01"
-    assert rules.file_date(row(path="inbox/2018-01-01/scan_2019-13-45.pdf")) == "2020-01-02"
-    assert rules.file_date(row(path="inbox/x/a.txt", mtime_utc="2021-12-31T23:59:59Z")) == "2021-12-31"
+def test_dates_in_names(stem: str, date: str | None) -> None:
+    found = naming.name_date(stem)
+    assert (found[0] if found else None) == date
 
 
 @pytest.mark.parametrize(
-    ("name", "date"),
+    ("stem", "slug"),
     [
-        ("IMG_20190714.jpg", "2019-07-14"),
-        ("scan_2019-13-45.pdf", None),
-        ("IMG_201907141022.jpg", None),
-        ("backup-1985-06-01.zip", None),
-        ("2019-02-30 then 2019-03-01.txt", "2019-03-01"),
-        ("v20190714-2.txt", "2019-07-14"),
-        ("2031-05-06.txt", None),
-        ("20200229.csv", "2020-02-29"),
-        ("20210229.csv", None),
-        ("2019-0714.txt", None),
+        ("Copy of Report (1)", "report"),
+        ("report - Copy (2)", "report"),
+        ("report copy 2", "report"),
+        ("report_copy3", "report"),
+        ("report (1) - Copy", "report"),
+        ("photo 2", "photo-2"),
+        ("Résumé – Jürgen Müller", "resume-jurgen-muller"),
+        ("日本語メモ", "file"),
+        ("IMG_20180305_120102", "img-120102"),
+        ("ＡＢＣ report", "abc-report"),
+        ("final v2", "final-v2"),
+        ("a" * 70, "a" * 60),
+        ("x" * 59 + "-yy", "x" * 59),
     ],
 )
-def test_name_dates(name: str, date: str | None) -> None:
-    assert rules.name_date(name) == date
+def test_slugs(stem: str, slug: str) -> None:
+    assert naming.slug_of(stem) == slug
+
+
+def test_scheme_form_names_keep_their_slug_and_date() -> None:
+    assert naming.name_facts("2019-07-14_beach_3.jpg", "jpg") == ("2019-07-14", "beach")
+    assert naming.name_facts("undated_notes.tar.gz", "tar.gz") == (None, "notes")
+    assert naming.name_facts("1975-01-02_old.pdf", "pdf") == ("1975-01-02", "old")  # embedded-range years are accepted
+    assert naming.name_facts("2019-07-14_Beach.jpg", "jpg") == ("2019-07-14", "beach")  # not scheme form: a slug
+
+
+def test_base_paths_and_conforming() -> None:
+    base = naming.base_path("images", "jpg", "jpg", "2019-07-14", "beach")
+    assert base == "organized/images/jpg/2019/2019-07-14_beach.jpg"
+    assert naming.base_path("archives", "gz", "tar.gz", None, "logs") == "organized/archives/gz/undated/undated_logs.tar.gz"
+    assert naming.conforms(base, base, "jpg") and naming.conforms(base.replace(".jpg", "_2.jpg"), base, "jpg")
+    assert naming.conforms(base.replace(".jpg", "_12.jpg"), base, "jpg")
+    for other in (base.replace(".jpg", "_1.jpg"), base.replace(".jpg", "_02.jpg"), base.replace(".jpg", "_x.jpg"), base + ".jpg"):
+        assert not naming.conforms(other, base, "jpg")
+
+
+def kind(data: bytes, name: str = "x") -> tuple[str, str, str]:
+    found = sniff.sniff(data, name, naming.claimed_ext(name))
+    return found.group, found.type, found.ext
 
 
 @pytest.mark.parametrize(
-    ("name", "expected"),
+    ("sample", "name", "expected"),
     [
-        ("report (1)", "report"),
-        ("report - copy (2).pdf", "report"),
-        ("Résumé – Jürgen final.docx", "resume-jurgen"),
-        ("Résumé – Jürgen (final).docx", "resume-jurgen-final"),
-        ("IMG_0042 (1).JPG", "img-0042"),
-        ("notes_v2.txt", "notes"),
-        ("project (1) final.pdf", "project"),
-        ("日本語メモ.txt", "file"),
-        ("_v3.txt", "file"),
-        ("ﬁnal report.md", "final-report"),
-        (".DS_Store", "ds-store"),
-        ("Mr. Smith letter", "mr-smith-letter"),
-        ("a.b.c", "a-b"),
-        ("ＡＢＣ.txt", "abc"),
-        ("Copy of x.txt", "copy-of-x"),
-        ("x copy3.txt", "x"),
-        ("x-FINAL.txt", "x"),
-        ("Photo 2019-07-14 10.22.31.jpg", "photo-2019-07-14-10-22-31"),
+        ("jpg", "x.png", ("images", "jpg", "jpg")),
+        ("jpg", "x.jpeg", ("images", "jpg", "jpg")),
+        ("png", "x", ("images", "png", "png")),
+        ("tiff", "x.tif", ("images", "tiff", "tiff")),
+        ("tiff", "x.NEF", ("images", "raw", "nef")),
+        ("heic", "x.jpg", ("images", "heic", "heic")),
+        ("avif", "x", ("images", "avif", "avif")),
+        ("mov", "x.mp4", ("video", "mov", "mov")),
+        ("m4a", "x", ("audio", "m4a", "m4a")),
+        ("docx", "x.zip", ("documents", "docx", "docx")),
+        ("xlsx", "x", ("spreadsheets", "xlsx", "xlsx")),
+        ("pptx", "x", ("presentations", "pptx", "pptx")),
+        ("odt", "x", ("documents", "odt", "odt")),
+        ("ods", "x", ("spreadsheets", "ods", "ods")),
+        ("odp", "x", ("presentations", "odp", "odp")),
+        ("epub", "x.zip", ("documents", "epub", "epub")),
+        ("zip", "x.docx", ("archives", "zip", "zip")),
+        ("zip", "x.pages", ("other", "pages", "pages")),
+        ("jar", "x.jar", ("other", "jar", "jar")),
+        ("gz", "logs.TGZ", ("archives", "gz", "tar.gz")),
+        ("gz", "x.gz", ("archives", "gz", "gz")),
+        ("bin", "x.dat", ("other", "dat", "dat")),
+        ("bin", "x.jpeg", ("other", "bin", "bin")),
+        ("bin", "x.txt", ("other", "bin", "bin")),
+        ("bin", "x", ("other", "bin", "bin")),
+        ("txt", "x.jpg", ("documents", "txt", "txt")),
+        ("csv", "x.txt", ("documents", "txt", "txt")),
+        ("csv", "x", ("spreadsheets", "csv", "csv")),
+        ("json", "x", ("data", "json", "json")),
+        ("log", "x", ("data", "log", "log")),
+        ("html", "x", ("documents", "html", "html")),
+        ("svg", "x.png", ("images", "svg", "svg")),
+        ("yaml", "x.yml", ("data", "yaml", "yaml")),
+        ("md", "notes.markdown", ("documents", "md", "md")),
+        ("rtf", "x", ("documents", "rtf", "rtf")),
     ],
 )
-def test_slugs(name: str, expected: str) -> None:
-    assert rules.slug(name) == expected
-
-
-def test_claimed_extensions_and_junk() -> None:
-    assert rules.claimed_ext("Thumbs.db") == "db"
-    assert rules.claimed_ext("archive.tar.gz") == "gz"
-    assert rules.claimed_ext(".DS_Store") == ""
-    assert rules.claimed_ext("Mr. Smith letter") == ""
-    assert rules.claimed_ext("a.") == ""
-    assert rules.claimed_ext("IMG_0042.JPEG") == "JPEG"
-    assert rules.stem("IMG_0042.JPEG") == "IMG_0042"
-    assert all(rules.is_junk(name) for name in [".DS_Store", ".ds_store", "Thumbs.db", "thumbs.DB", "desktop.ini", "~$x.docx", "a.tmp", "a.TMP", "x.part"])
-    assert not any(rules.is_junk(name) for name in ["part.txt", "tmp", "DS_Store", "x.tmpx", "desktop.ini.txt"])
-
-
-def test_plan_keeps_the_earliest_copy_then_the_smallest_path() -> None:
-    rows = [
-        row(path="inbox/b/x.txt", sha256="1" * 64, mtime_utc="2020-01-02T00:00:00Z"),
-        row(path="inbox/a/Copy of x.txt", sha256="1" * 64, mtime_utc="2020-01-01T00:00:00Z"),
-        row(path="inbox/c/x (1).txt", sha256="1" * 64, mtime_utc="2020-01-03T00:00:00Z"),
-        row(path="inbox/z/y.txt", sha256="2" * 64, mtime_utc="2020-05-05T00:00:00Z"),
-        row(path="inbox/a/y.txt", sha256="2" * 64, mtime_utc="2020-05-05T00:00:00Z"),
-    ]
-    planned = rules.plan(rows)
-    assert dict(planned.moves) == {"inbox/a/Copy of x.txt": "organized/documents/txt/2020/2020-01-01_copy-of-x.txt", "inbox/a/y.txt": "organized/documents/txt/2020/2020-05-05_y.txt"}
-    assert planned.deletes == ("inbox/b/x.txt", "inbox/c/x (1).txt", "inbox/z/y.txt")
-    assert (planned.unique, planned.duplicates, planned.removed) == (2, 3, 0)
-
-
-def test_plan_deletes_junk_and_empty_files_and_keeps_near_duplicates() -> None:
-    rows = [
-        row(path="inbox/a/.DS_Store", sha256="1" * 64, type="bin"),
-        row(path="inbox/a/report.TMP", sha256="2" * 64),
-        row(path="inbox/a/empty.png", sha256="3" * 64, size=0, type="png"),
-        row(path="inbox/b/empty.txt", sha256="3" * 64, size=0),
-        row(path="inbox/a/same.txt", sha256="4" * 64, size=9, mtime_utc="2020-01-01T00:00:00Z"),
-        row(path="inbox/b/same.txt", sha256="5" * 64, size=9, mtime_utc="2020-01-01T00:00:00Z"),
-        row(path="organized/documents/txt/2020/2020-01-01_other.txt", sha256="6" * 64),
-    ]
-    planned = rules.plan(rows)
-    assert planned.deletes == ("inbox/a/.DS_Store", "inbox/a/empty.png", "inbox/a/report.TMP", "inbox/b/empty.txt")
-    assert planned.moves == (("inbox/a/same.txt", "organized/documents/txt/2020/2020-01-01_same.txt"), ("inbox/b/same.txt", "organized/documents/txt/2020/2020-01-01_same-2.txt"))
-    assert (planned.unique, planned.duplicates, planned.removed) == (2, 0, 4)
-
-
-def test_plan_orders_collisions_by_mtime_then_path_and_chains_suffixes() -> None:
-    rows = [
-        row(path="inbox/a/report.pdf", sha256="1" * 64, type="pdf", pdf="D:20190714", mtime_utc="2020-03-03T00:00:00Z"),
-        row(path="inbox/b/report (1).pdf", sha256="2" * 64, type="pdf", pdf="D:20190714", mtime_utc="2020-01-01T00:00:00Z"),
-        row(path="inbox/c/report-2.pdf", sha256="3" * 64, type="pdf", pdf="D:20190714", mtime_utc="2020-02-02T00:00:00Z"),
-        row(path="inbox/d/report.pdf", sha256="4" * 64, type="pdf", pdf="D:20190714", mtime_utc="2020-02-02T00:00:00Z"),
-    ]
-    planned = rules.plan(rows)
-    assert planned.moves == (
-        ("inbox/b/report (1).pdf", "organized/documents/pdf/2019/2019-07-14_report.pdf"),
-        ("inbox/c/report-2.pdf", "organized/documents/pdf/2019/2019-07-14_report-2.pdf"),
-        ("inbox/d/report.pdf", "organized/documents/pdf/2019/2019-07-14_report-3.pdf"),
-        ("inbox/a/report.pdf", "organized/documents/pdf/2019/2019-07-14_report-4.pdf"),
-    )
-    assert [path for _digest, path in planned.expected] == sorted(path for _src, path in planned.moves)
+def test_sniffing_by_content(sample: str, name: str, expected: tuple[str, str, str]) -> None:
+    assert kind(builders.SAMPLES[sample](4, "2019-07-14"), name) == expected
 
 
 @pytest.mark.parametrize(
-    ("path", "problem"),
+    ("data", "expected"),
     [
-        ("organized/images/jpg/2019/2019-07-14_img-0042.jpg", None),
-        ("organized/images/jpg/2019/2019-07-14_img-0042-2.jpg", None),
-        ("organized/other/bin/1999/1999-12-31_file.bin", None),
-        ("organized/images/png/2019/2019-07-14_x.jpg", "does not belong"),
-        ("organized/images/jpg/2018/2019-07-14_x.jpg", "year folder"),
-        ("organized/images/jpg/2019/2019-02-30_x.jpg", "not a real date"),
-        ("organized/images/jpg/2019/2019-07-14_X.jpg", "not organized"),
-        ("organized/duplicates/x.jpg", "not organized"),
-        ("inbox/x.jpg", "not organized"),
-        ("organized/images/jpg/2019/2019-07-14_x.jpeg", "does not belong"),
+        (b"ID3\x03\x00rest", ("audio", "mp3", "mp3")),
+        (b"ID3 tags are notes", ("documents", "txt", "txt")),  # text, not an ID3 header
+        (b"\xff\xfb\x90\x64" + b"\x00" * 20, ("audio", "mp3", "mp3")),
+        (b"\xff\xf1\x50\x80" + b"\x00" * 20, ("other", "bin", "bin")),  # AAC ADTS: layer bits 00
+        (b"RIFF\x10\x00\x00\x00WEBPVP8 ", ("images", "webp", "webp")),
+        (b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00mif1avif", ("images", "avif", "avif")),
+        (b"\x00\x00\x00\x14ftypmif1\x00\x00\x00\x00mif1", ("images", "heic", "heic")),
+        (b"\x00\x00\x00\x14ftypcrx \x00\x00\x00\x01crx ", ("images", "raw", "cr3")),
+        (b"\x00\x00\x00\x14ftypisom\x00\x00\x02\x00isom", ("video", "mp4", "mp4")),
+        (b"FUJIFILMCCD-RAW 0201", ("images", "raw", "raf")),
+        (b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska", ("video", "mkv", "mkv")),
+        (b"PK\x05\x06" + b"\x00" * 18, ("archives", "zip", "zip")),
+        (b"\xef\xbb\xbf# Title\n", ("documents", "md", "md")),
+        (b'<?xml version="1.0"?>\n<svg/>', ("images", "svg", "svg")),
+        (b'<?xml version="1.0"?><?other x?><svg/>', ("documents", "txt", "txt")),  # svg must follow the first ?>
+        (b"<!DOCTYPE HTML><p>", ("documents", "html", "html")),
+        (b"a,b\n\n1,2\n3,4\n", ("spreadsheets", "csv", "csv")),
+        (b"a,b\n1,2\n3\n", ("documents", "txt", "txt")),
+        (b"2021-05-06T10:00:00 start\n", ("data", "log", "log")),
+        (b"text\x00with nul", ("other", "bin", "bin")),
     ],
 )
-def test_target_problems(path: str, problem: str | None) -> None:
-    found = rules.target_problem(path)
-    assert (found is None) if problem is None else (problem in found)
+def test_sniffing_edge_rows(data: bytes, expected: tuple[str, str, str]) -> None:
+    assert kind(data) == expected
+
+
+@pytest.mark.parametrize("sample", sorted(builders.DATED))
+def test_every_dated_type_gives_its_embedded_date(sample: str) -> None:
+    facts = walk.describe("x." + builders.natural_ext(sample), builders.SAMPLES[sample](8, "2016-02-29"))
+    assert facts.date == "2016-02-29" and facts.date_source not in ("name", "none")
+    undated = walk.describe("x." + builders.natural_ext(sample), builders.SAMPLES[sample](8, None))
+    assert undated.date is None and undated.date_source == "none"
+
+
+def test_embedded_dates_win_over_names_and_only_real_dates_in_range_count() -> None:
+    assert walk.describe("IMG_20180305.jpg", builders.jpeg(1, "2019-07-14")).date == "2019-07-14"
+    assert walk.describe("IMG_20180305.jpg", builders.jpeg(1, None)).date == "2018-03-05"
+    for stored, expected in (("1970-12-31", None), ("1971-01-01", "1971-01-01"), ("2099-12-31", "2099-12-31"), ("2100-01-01", None)):
+        exif = builders.exif_bytes(None)
+        data = builders.saved(builders.picture(1), "JPEG", exif=exif)
+        found = meta.dated(meta.EXIF, stored, meta.EXIF_DATE.match(stored.replace("-", ":")))
+        assert (found[2] if found else None) == expected, stored
+        assert data
+
+
+def test_pdf_the_last_creation_date_counts() -> None:
+    assert walk.describe("x.pdf", builders.pdf(1, "2015-03-04", updated="2020-05-06")).date == "2020-05-06"
+    hex_only = b"%PDF-1.4\n3 0 obj << /CreationDate <FEFF00440020> >> endobj\n%%EOF\n"
+    assert walk.describe("x.pdf", hex_only).date is None
+
+
+def test_png_exif_comes_before_text_and_rfc_dates_read() -> None:
+    assert walk.describe("x.png", builders.png_text(1, "2011-12-13", rfc=True)).date == "2011-12-13"
+    assert walk.describe("x.png", builders.png_text(1, "2011-12-13")).date_source == "png-text"
+
+
+@pytest.mark.parametrize(
+    ("text", "date"),
+    [
+        ("---\ndate: '2019-07-14'\n---\n# x", "2019-07-14"),
+        ("---\ntitle: x\n  ---  \ndate: 2019-07-14\n", None),  # after the closing line
+        ("# x\n---\ndate: 2019-07-14\n---\n", None),  # no front matter
+        ("---\r\ndate: \"2019-07-14T10:00\"\r\n---\r\n", "2019-07-14"),
+    ],
+)
+def test_front_matter_dates(text: str, date: str | None) -> None:
+    assert walk.describe("note.md", text.encode()).date == date
+
+
+def test_media_creation_time_zero_means_none() -> None:
+    assert walk.describe("x.mp4", builders.mp4(1, None)).date is None
+    assert walk.describe("x.mov", builders.mov(1, "1999-12-31")).date == "1999-12-31"
+
+
+def test_zip_entries_read_stored_and_deflated_and_refuse_others() -> None:
+    for data in (builders.ooxml("docx", 1, "2001-02-03", deflate=True), builders.ooxml("docx", 1, "2001-02-03", deflate=False)):
+        assert formats.zip_member(data, "docProps/core.xml") is not None
+    assert formats.zip_member(b"PK\x03\x04 not really", "x") is None
+
+
+@pytest.mark.parametrize("level", range(10))
+def test_the_inflater_matches_zlib(level: int) -> None:
+    rng = random.Random(level)
+    for size in (0, 1, 7, 300, 5000, 70000):
+        for data in (bytes(rng.randrange(256) for _ in range(size)), (b"<w:t>lorem ipsum</w:t>" * (size // 20 + 1))[:size]):
+            packer = zlib.compressobj(level, zlib.DEFLATED, -15)
+            assert inflate.inflate(packer.compress(data) + packer.flush(), 1 << 20) == data
+
+
+def test_the_inflater_refuses_bad_streams_and_bombs() -> None:
+    assert inflate.inflate(b"\xff\xff\xff", 100) is None
+    packer = zlib.compressobj(9, zlib.DEFLATED, -15)
+    assert inflate.inflate(packer.compress(b"\x00" * 2_000_000) + packer.flush(), 1 << 20) is None
