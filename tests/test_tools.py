@@ -120,7 +120,7 @@ def test_apply_checks_the_bytes_before_acting(tmp_path: Path) -> None:
     i = {row.path: row.i for row in out.rows}
     (workspace / "Downloads/notes.txt").write_bytes(b"changed\n")
     done = organizer.apply(ApplyInput(folder="Downloads", moves=[Move(i=i["notes.txt"], n=1)], deletes=[]), workspace)
-    assert done.applied == 0 and "changed since survey" in done.errors[0]
+    assert done.applied == 0 and "changed or unreadable since survey" in done.errors[0]
 
 
 def test_apply_needs_a_survey_of_this_run(tmp_path: Path) -> None:

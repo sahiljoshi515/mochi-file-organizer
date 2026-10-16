@@ -377,3 +377,114 @@ DATED = frozenset({"jpg", "tiff", "webp", "png", "png-text", "avif", "heic", "mp
 
 def natural_ext(kind: str) -> str:
     return NATURAL_EXT.get(kind, kind)
+
+# ----- Edge files for the review's findings (FO-08 to FO-16) -----
+
+
+def office_zip(main: str, content_type: str | None, default: str | None = None) -> bytes:
+    types = ['<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">']
+    if default:
+        types.append(f'<Default Extension="{main.rsplit(".", 1)[1].upper()}" ContentType="{default}"/>')
+    if content_type:
+        types.append(f"<Override ContentType='{content_type}' PartName='/{main.upper()}'/>")
+    types.append("</Types>")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "".join(types))
+        archive.writestr(main, "<x/>")
+        archive.writestr("docProps/core.xml", '<cp:coreProperties><dcterms:created xsi:type="x">2021-05-06T07:08:09Z</dcterms:created></cp:coreProperties>')
+    return buffer.getvalue()
+
+
+def tiff_ifd(tags: list[tuple[int, int, bytes]]) -> bytes:
+    """A little-endian TIFF with one IFD at 8: (tag, type, value) entries; values over 4 bytes follow the IFD."""
+    entries, extra = [], b""
+    data_at = 8 + 2 + 12 * len(tags) + 4
+    for tag, kind_code, value in tags:
+        count = len(value) if kind_code == 2 else 1
+        if len(value) <= 4:
+            entries.append(struct.pack("<HHI", tag, kind_code, count) + value.ljust(4, b"\x00"))
+        else:
+            entries.append(struct.pack("<HHII", tag, kind_code, count, data_at + len(extra)))
+            extra += value
+    return b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", len(tags)) + b"".join(entries) + b"\x00\x00\x00\x00" + extra
+
+
+def cr3(cmt1: bytes, cmt2: bytes | None) -> bytes:
+    canon = bytes.fromhex("85c0b687820f11e08111f4ce462b6a48")
+    parts = box(b"CMT1", cmt1) + (box(b"CMT2", cmt2) if cmt2 is not None else b"")
+    moov = box(b"moov", box(b"uuid", canon + box(b"CNCV", b"CanonCR3_001/00.09.00/00.00.00") + parts))
+    return box(b"ftyp", b"crx \x00\x00\x00\x01crx isom") + moov + box(b"mdat", b"\x00" * 16)
+
+
+def png_with_text(text: str) -> bytes:
+    import zlib
+
+    def chunk(kind_name: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + kind_name + body + struct.pack(">I", zlib.crc32(kind_name + body))
+
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)) + chunk(b"tEXt", b"Creation Time\x00" + text.encode("latin-1")) + chunk(b"IEND", b"")
+
+
+def classic_quicktime(seconds: int) -> bytes:
+    """A QuickTime file without ftyp: moov (mvhd with `seconds` since 1904) first, then mdat."""
+    mvhd = full_box(b"mvhd", 0, 0, struct.pack(">IIII", seconds, seconds, 600, 600) + b"\x00" * 80)
+    return box(b"moov", mvhd) + box(b"mdat", b"\x00" * 32)
+
+
+def transport_stream(packets: int) -> bytes:
+    return b"".join(b"\x47" + bytes([index % 256]) * 187 for index in range(packets))
+
+
+def edge_files() -> dict[str, bytes]:
+    """Files at the edges RULES.md now decides: wide and legacy text, unlisted text extensions, the
+    Office family, classic QuickTime, MPEG-TS, CR3 metadata, PDF information, JSON depth, zip end records."""
+    note = "Notes from Tuesday\r\nbuy milk\r\n"
+    canon_tiff = tiff_ifd([(0x010F, 2, b"Canon\x00")])
+    document = office_zip("word/document.xml", None)
+    end = document.rindex(b"PK\x05\x06")
+    stray = b"PK\x05\x06" + b"\x00" * 14
+    return {
+        "Notes from Tuesday.txt": b"\xff\xfe" + note.encode("utf-16-le"),
+        "backup.reg": b"\xff\xfe" + "Windows Registry Editor Version 5.00\r\n".encode("utf-16-le"),
+        "be": b"\xfe\xff" + "# Heading\n".encode("utf-16-be"),
+        "wide.csv": b"\xff\xfe\x00\x00" + "a,b\n1,2\n3,4\n".encode("utf-32-le"),
+        "people.csv": "Name,Ciudad,Año\nJosé,Bogotá,1999\nRenée,Zürich,2001\n".encode("cp1252"),
+        "page.htm": "<html><body>Café “crème”</body></html>".encode("cp1252"),
+        "old.md": "---\ndate: 2011-03-04\n---\n# Café\n".encode("cp1252"),
+        "odd.txt": b"caf\xe9 \x81",
+        "Geotag.gpx": b'<?xml version="1.0"?><gpx version="1.1"><trk/></gpx>\n',
+        "Info.plist": b'<?xml version="1.0"?><plist/>\n',
+        "Makefile": b"all:\n\tcc main.c\n",
+        "issue221.xlsm": office_zip("xl/workbook.xml", "application/vnd.ms-excel.sheet.macroEnabled.main+xml"),
+        "renamed.xlsx": office_zip("xl/workbook.xml", "application/vnd.ms-excel.template.macroEnabled.main+xml"),
+        "deck.pptx": office_zip("ppt/presentation.xml", "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml"),
+        "binary.xlsb": office_zip("xl/workbook.bin", None, "application/vnd.ms-excel.sheet.binary.macroEnabled.main"),
+        "bare.xltm": office_zip("xl/workbook.xml", None),
+        "bare.docm": office_zip("xl/workbook.xml", None),
+        "letter.docx": document[: end + 20] + struct.pack("<H", len(stray)) + stray,
+        "QuickTime.mov": classic_quicktime(3_500_000_000),
+        "clip": classic_quicktime(3_400_000_000),
+        "broadcast.ts": transport_stream(5),
+        "short.ts": transport_stream(2),
+        "IMG_0001.CR3": cr3(canon_tiff, tiff_ifd([(0x9003, 2, b"2021:05:12 10:11:12\x00")])),
+        "none.cr3": cr3(canon_tiff, None),
+        "latex.pdf": (
+            b"%PDF-1.5\n3 0 obj << /Producer (pdfTeX) /CreationDate (D:20170131010939Z) >> endobj\n"
+            b"9 0 obj << /Type /XObject /CreationDate (D:20141219120000) >> endobj\ntrailer << /Root 1 0 R /Info 3 0 R >>\n%%EOF\n"
+        ),
+        "packed.pdf": b"%PDF-1.5\n9 0 obj << /CreationDate (D:20141219120000) >> endobj\ntrailer << /Info 3 0 R >>\n%%EOF\n",
+        "bare 2018-02-03.pdf": b"%PDF-1.5\n3 0 obj << /Producer (x) >> endobj\n9 0 obj << /CreationDate (D:20141219) >> endobj\ntrailer << /Info 3 0 R >>\n",
+        "deep-512": ("[" * 512 + "]" * 512).encode(),
+        "deep-513": ("[" * 513 + "]" * 513).encode(),
+        "nan": b"[NaN, Infinity]",
+        "bom-json": b'\xef\xbb\xbf{"a": 1}',
+        "song.mp3": mp3(2, None),
+        "noise.dat": b"\xff\xfb\x90\x64" + bytes(range(256)) * 3,
+        "front.md": b"---\ntitle: x\n \t---\t\ndate: 2020-01-02\n",
+        "open.md": b"---\ndate: 2020-01-02\n",
+        "t.png": png_with_text(" 7\tmar   2014"),
+        "a.orf": b"IIRO\x08\x00\x00\x00",
+        "zip.bin": plain_zip(1, None),
+        "zip.jpeg": plain_zip(2, None),
+    }

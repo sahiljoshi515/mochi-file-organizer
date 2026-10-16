@@ -68,7 +68,7 @@ def verify_output(input_value, output_value, workspace):
             return result(False, f"row {i} ({entry['path']}) is still there although its delete reported no error")
         if row["drop"] is None:
             if held is None:
-                held = {digest(root / path) for path in scan(root).files}
+                held = {digest(root / path) for path in scan(Path(workspace), root).files}
             if row["sha256"] not in held:
                 return result(False, f"row {i} was the last copy of its bytes and was deleted")
         done += 1

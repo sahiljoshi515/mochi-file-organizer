@@ -133,10 +133,23 @@ class PinnedFile(Output):
 
 
 @dataclass
+class KeptEntry(Output):
+    path: Annotated[str, "A path relative to your agent folder"]
+    folder: Annotated[bool, "Whether it is a folder"]
+    size: Annotated[int, "Bytes; 0 for a folder"]
+    sha256: Annotated[str | None, "The file's SHA-256 hex digest; null for a folder"]
+
+
+@dataclass
 class PinOutput(Output):
     folder: Annotated[str, "The folder"]
     files: Annotated[list[PinnedFile], "Every file that takes part, in order"]
-    taken: Annotated[list[str], "Every path that existed under organized/ when the run started"]
+    taken: Annotated[list[str], "Every path under organized/ that the run starts with (empty folders aside)"]
+    kept: Annotated[
+        list[KeptEntry],
+        "Everything the run leaves exactly as it was: the hidden files and folders in the folder, and every file and"
+        " folder in the agent folder outside it (the plugin's run state aside), by path",
+    ]
     pending: Annotated[int, "How many actions the folder needs in all"]
     quota: Annotated[int, "How many of them this run does"]
     entries_after: Annotated[int, "How many files and folders the agent folder holds after this run"]

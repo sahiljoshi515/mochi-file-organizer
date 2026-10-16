@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 from .formats import (
+    cr3_dates_original,
     front_matter_date,
     heif_exif,
     jpeg_exif,
@@ -15,7 +16,6 @@ from .formats import (
     pdf_creation,
     png_chunks,
     riff_chunks,
-    searched_exif,
     tiff_date_original,
     zip_member,
 )
@@ -32,12 +32,13 @@ EXIF_DATE = re.compile(r"([0-9]{4}):([0-9]{2}):([0-9]{2})")
 ISO_DATE = re.compile(r"\s*([0-9]{4})-([0-9]{2})-([0-9]{2})")
 RFC_DATE = re.compile(r"\s*(?:[A-Za-z]{3},\s*)?([0-9]{1,2})\s+([A-Za-z]{3})\s+([0-9]{4})")
 PDF_DATE = re.compile(r"(?:D:)?([0-9]{4})([0-9]{2})([0-9]{2})")
-CORE_CREATED = re.compile(r"<dcterms:created(?:\s[^>]*)?>")
-ODF_CREATED = re.compile(r"<meta:creation-date(?:\s[^>]*)?>")
+CORE_CREATED = re.compile(r"<dcterms:created(?:\s[^<>]*+)?>")
+ODF_CREATED = re.compile(r"<meta:creation-date(?:\s[^<>]*+)?>")
 LEADING_DATE = re.compile(r"\s*([0-9]{4})-([0-9]{2})-([0-9]{2})")
+FRONT_DATE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 MONTHS = {name: index for index, name in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 SECONDS_1904_TO_1970 = 2082844800
-OOXML = frozenset({"docx", "xlsx", "pptx"})
+OOXML = frozenset(["docx", "docm", "dotx", "dotm", "xlsx", "xlsm", "xltx", "xltm", "xlam", "xlsb", "pptx", "pptm", "potx", "potm", "ppsx", "ppsm", "ppam"])
 ODF_KINDS = frozenset({"odt", "ods", "odp"})
 SEARCHED = frozenset({"heic", "avif"})
 ISO_MEDIA = frozenset({"mp4", "mov", "m4a"})
@@ -53,7 +54,10 @@ def dated(source: str, raw: str, found: re.Match | None) -> Found | None:
 
 
 def exif_date(tiff: bytes | None) -> Found | None:
-    raw = tiff_date_original(tiff) if tiff else None
+    return exif_value(tiff_date_original(tiff) if tiff else None)
+
+
+def exif_value(raw: str | None) -> Found | None:
     return dated(EXIF, raw, EXIF_DATE.match(raw)) if raw is not None else None
 
 
@@ -119,7 +123,7 @@ def embedded(kind: str, ext: str, data: bytes, text: str | None) -> Found | None
     if kind in SEARCHED:
         return exif_date(heif_exif(data))
     if kind == "raw" and ext == "cr3":
-        return exif_date(searched_exif(data))
+        return next((found for found in map(exif_value, cr3_dates_original(data)) if found), None)
     if kind == "webp":
         return webp_date(data)
     if kind == "png":
@@ -135,7 +139,5 @@ def embedded(kind: str, ext: str, data: bytes, text: str | None) -> Found | None
         return media_date(data)
     if kind == "md" and text is not None:
         raw = front_matter_date(text)
-        if raw is None:
-            return None
-        return dated(FRONT_MATTER, raw, re.match(r"([0-9]{4})-([0-9]{2})-([0-9]{2})", raw.strip("'\"")))
+        return None if raw is None else dated(FRONT_MATTER, raw, FRONT_DATE.match(raw))
     return None

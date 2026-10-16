@@ -1,0 +1,38 @@
+{
+ "note": "a file in the folder cannot be read when the run starts: survey refuses it plainly, and so does the verdict",
+ "task": "organize-folder",
+ "arguments": {
+  "folder": "Downloads"
+ },
+ "agent_folder": "folders/unreadable.tar.gz",
+ "steps": [
+  {
+   "python": "(workspace / 'Downloads' / 'a.txt').chmod(0)\n"
+  },
+  {
+   "tool": "survey",
+   "arguments": {
+    "folder": "Downloads"
+   },
+   "expect_error": true
+  },
+  {
+   "tool": "submit",
+   "arguments": {
+    "folder": "Downloads",
+    "files": 0,
+    "moved": 0,
+    "deleted": 0,
+    "stayed": 0,
+    "left": 0,
+    "remaining": 0
+   }
+  }
+ ],
+ "answer": "Done.",
+ "expect": {
+  "valid": false,
+  "score_max": 0.99,
+  "message_contains": "Downloads/a.txt cannot be read"
+ }
+}

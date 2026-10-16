@@ -81,6 +81,10 @@ def test_case(tmp_path: Path, case_path: Path) -> None:
             if step["tool"] == "submit":
                 submitted = build_output(arguments_given, TASKS[Task.ORGANIZE_FOLDER][1])
                 continue
+            if step.get("expect_error"):
+                with pytest.raises(ValueError):
+                    call(Tool(step["tool"]), arguments_given, workspace)
+                continue
             output = call(Tool(step["tool"]), arguments_given, workspace)
             if step.get("save_as"):
                 outputs[step["save_as"]] = json.loads(json.dumps(plain_output(output)))
@@ -106,4 +110,10 @@ def test_the_cases_cover_every_wrong_row() -> None:
     names = {path.stem for path in CASES}
     for row in ("keeper_wrong", "duplicate_kept", "rank_swapped", "skipped_batch", "junk_as_move", "fabricated_summary", "tamper_after_apply", "stray_file", "copied_not_moved", "out_of_quota"):
         assert f"wrong_{row}" in names
+    for tamper in (
+        "hidden_deleted", "hidden_modified", "hidden_stray_copy", "duplicate_hidden", "duplicate_into_hidden_folder", "junk_hidden",
+        "outside_deleted", "outside_modified", "duplicate_moved_outside", "empty_folder_left", "junk_replaced_by_folder",
+        "fifo_added", "unreadable_target", "unreadable_input", "symlink_file", "symlink_folder",
+    ):  # fmt: skip
+        assert f"wrong_{tamper}" in names  # the review's red team (FO-01 to FO-05)
     assert sum(name.startswith("gold_") for name in names) >= 7

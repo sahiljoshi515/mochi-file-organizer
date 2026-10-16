@@ -1,0 +1,35 @@
+{
+ "note": "the folder holds a symlink to another folder of the member",
+ "task": "organize-folder",
+ "arguments": {
+  "folder": "Downloads"
+ },
+ "agent_folder": "folders/symlink-folder.tar.gz",
+ "steps": [
+  {
+   "tool": "survey",
+   "arguments": {
+    "folder": "Downloads"
+   },
+   "expect_error": true
+  },
+  {
+   "tool": "submit",
+   "arguments": {
+    "folder": "Downloads",
+    "files": 0,
+    "moved": 0,
+    "deleted": 0,
+    "stayed": 0,
+    "left": 0,
+    "remaining": 0
+   }
+  }
+ ],
+ "answer": "Done.",
+ "expect": {
+  "valid": false,
+  "score_max": 0.99,
+  "message_contains": "Downloads/linkdir is a symlink"
+ }
+}

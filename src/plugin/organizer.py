@@ -1,11 +1,12 @@
 """The tools: pin the answer key (pin_layout), list this run's files to act on (survey), and move or
 delete them by number (apply), in the member's own folder.
 
-A run is one plugin process. Its first survey takes the snapshot and the plan and fixes the run's
-quota (the first 60 actions in the rules' order); later surveys answer with the same rows. apply acts
-only on those rows, checks each file's bytes before touching it, moves a file only to the n-th free
-name of its base, and never deletes the last copy of anything. The run's state is also written to
-.file-organizer/state.json in the agent folder, so the verifier can check every call.
+A run is one plugin process. Its first survey takes the snapshot and the plan, fixes the run's quota
+(the first 60 actions in the rules' order) and removes the folder's empty folders; later surveys answer
+with the same rows. apply acts only on those rows, checks each file's bytes before touching it, moves a
+file only to the n-th free name of its base, never deletes the last copy of anything, and removes the
+folders it leaves empty. The run's state is also written to .file-organizer/state.json in the agent
+folder, so the verifier can check every call.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from contract import (
     ApplyOutput,
     DateSource,
     Drop,
+    KeptEntry,
     OrganizeInput,
     OrganizeOutput,
     PinnedFile,
@@ -32,10 +34,10 @@ from contract import (
     SurveyOutput,
 )
 from plugin import plan, walk
-from plugin.layout import STATE_DIR, Layout, label, look, resolve
-from plugin.naming import path_key
+from plugin.layout import Layout, label, look, resolve
+from plugin.naming import is_hidden, path_key
+from plugin.walk import STATE_DIR, STATE_FILE, entry_kind
 
-STATE_FILE = "state.json"
 ITEM_LIMIT = 60
 TOKEN = uuid.uuid4().hex  # this process, i.e. this run
 
@@ -57,9 +59,9 @@ RUN: Run | None = None
 # ----- The folder -----
 
 
-def take_snapshot(workspace: Path, folder: str) -> Layout:
+def take_snapshot(workspace: Path, folder: str, read_kept: bool = False) -> Layout:
     """The folder under the rules, or ValueError saying what keeps the rules from it."""
-    found = look(workspace, folder)
+    found = look(workspace, folder, read_kept)
     if found.refused:
         raise ValueError(found.refused)
     return found
@@ -101,12 +103,13 @@ def pinned(fact: walk.Facts, step: plan.Step) -> PinnedFile:
 
 def pin_layout(given: OrganizeInput, workspace: Path) -> PinOutput:
     """The answer key: every file's facts and the rules' step for it, from this (scratch) copy of the agent folder."""
-    snap = take_snapshot(workspace, given.folder)
+    snap = take_snapshot(workspace, given.folder, read_kept=True)
     tally = plan.counts(snap.steps)
     return PinOutput(
         folder=given.folder,
         files=[pinned(fact, step) for fact, step in zip(snap.facts, snap.steps, strict=True)],
         taken=snap.taken,
+        kept=[KeptEntry(path=entry.path, folder=entry.folder, size=entry.size, sha256=snap.digests.get(entry.path)) for entry in snap.kept],
         pending=tally["pending"],
         quota=tally["quota"],
         entries_after=snap.entries_after,
@@ -196,6 +199,7 @@ def survey(given: OrganizeInput, workspace: Path) -> SurveyOutput:
             location={step.i: step.path for step in snap.steps},
             occupied={path_key(step.path) for step in snap.steps},
         )
+        prune(folder_root(workspace, given.folder))
         write_state(workspace, run)
         RUN = run
     run = RUN
@@ -214,8 +218,10 @@ def survey(given: OrganizeInput, workspace: Path) -> SurveyOutput:
 
 
 def present(root: Path, relative: str) -> bool:
-    path = root / relative
-    return path.is_file() and not path.is_symlink()
+    try:
+        return entry_kind(root / relative) == "file"
+    except OSError:
+        return False
 
 
 def other_copy(run: Run, root: Path, i: int) -> bool:
@@ -228,22 +234,41 @@ def other_copy(run: Run, root: Path, i: int) -> bool:
 
 
 def unchanged(root: Path, relative: str, digest: str) -> bool:
-    return present(root, relative) and hashlib.sha256((root / relative).read_bytes()).hexdigest() == digest
+    if not present(root, relative):
+        return False
+    try:
+        return hashlib.sha256((root / relative).read_bytes()).hexdigest() == digest
+    except OSError:
+        return False
 
 
 def prune(root: Path) -> None:
-    """Remove every empty folder inside `root` (never `root` itself, never inside a hidden folder)."""
+    """Remove every folder inside `root` that holds no file and no hidden entry (never `root` itself,
+    never a hidden folder or anything inside one), deepest first. A folder is removed only when it lists
+    nothing: macOS's rmdir would otherwise delete the orphaned `._*` files a folder still holds."""
     stack, folders = [root], []
     while stack:
-        for entry in stack.pop().iterdir():
-            if entry.is_dir() and not entry.is_symlink() and not entry.name.startswith("."):
+        try:
+            listed = list(stack.pop().iterdir())
+        except OSError:
+            continue
+        for entry in listed:
+            if not is_hidden(entry.name, folder=True) and present_folder(entry):
                 folders.append(entry)
                 stack.append(entry)
     for folder in sorted(folders, key=lambda path: len(path.parts), reverse=True):
         try:
-            folder.rmdir()
+            if next(folder.iterdir(), None) is None:
+                folder.rmdir()
         except OSError:
             continue
+
+
+def present_folder(path: Path) -> bool:
+    try:
+        return entry_kind(path) == "folder"
+    except OSError:
+        return False
 
 
 def delete_one(run: Run, root: Path, i: int) -> str | None:
@@ -254,10 +279,13 @@ def delete_one(run: Run, root: Path, i: int) -> str | None:
         return "already done"
     relative = run.location[i]
     if not unchanged(root, relative, step.sha256):
-        return "the file is gone or changed since survey"
+        return "the file is gone, changed or unreadable since survey"
     if drop_of(run, step) is None and not other_copy(run, root, i):
         return "it is the only copy of its bytes, so it is moved, not deleted"
-    (root / relative).unlink()
+    try:
+        (root / relative).unlink()
+    except OSError as error:
+        return f"it cannot be deleted ({error.strerror})"
     del run.location[i]
     run.occupied.discard(path_key(relative))
     run.applied.append({"i": i, "kind": "delete", "path": relative, "call": run.calls})
@@ -282,7 +310,7 @@ def move_one(run: Run, root: Path, i: int, n: int) -> str | None:
         return f"{destination} is already taken in this run: check n"
     relative = run.location[i]
     if not unchanged(root, relative, step.sha256):
-        return "the file is gone or changed since survey"
+        return "the file is gone, changed or unreadable since survey"
     target = root / destination
     for parent in reversed(target.parents):
         if parent == root or root.is_relative_to(parent):
@@ -291,8 +319,11 @@ def move_one(run: Run, root: Path, i: int, n: int) -> str | None:
             return f"{parent.relative_to(root).as_posix()} is not a folder"
     if target.exists() or target.is_symlink():
         return f"{destination} exists"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    (root / relative).rename(target)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).rename(target)
+    except OSError as error:
+        return f"it cannot be moved ({error.strerror})"
     run.location[i] = destination
     run.occupied.discard(path_key(relative))
     run.occupied.add(path_key(destination))
@@ -312,13 +343,19 @@ def apply(given: ApplyInput, workspace: Path) -> ApplyOutput:
     errors: list[str] = []
     applied = 0
     for i in given.deletes:
-        why = delete_one(run, root, i)
+        try:
+            why = delete_one(run, root, i)
+        except OSError as error:
+            why = f"it cannot be deleted ({error.strerror})"
         if why:
             errors.append(f"delete {i}: {why}")
         else:
             applied += 1
     for move in given.moves:
-        why = move_one(run, root, move.i, move.n)
+        try:
+            why = move_one(run, root, move.i, move.n)
+        except OSError as error:
+            why = f"it cannot be moved ({error.strerror})"
         if why:
             errors.append(f"move {move.i}: {why}")
         else:

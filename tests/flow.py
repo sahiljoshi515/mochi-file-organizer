@@ -4,10 +4,16 @@ RUN state reset), surveys, and applies the scripted agent's decisions. Tests and
 from __future__ import annotations
 
 import importlib.util
+import shutil
 from pathlib import Path
 
+from messy import unpack
+
+import verifier
 from contract import ApplyInput, Move, OrganizeInput
 from plugin import organizer
+
+TASK = "organize-folder"
 
 AGENT_FILE = Path(__file__).resolve().parent / "cases" / "agent.py"
 
@@ -52,3 +58,38 @@ def organize_fully(workspace: Path, folder: str, most: int = 40) -> int:
 def tree(root: Path) -> dict[str, bytes]:
     """Every file under `root` (hidden ones too), by relative path."""
     return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def host_run(tmp_path: Path, files: dict[str, bytes], folder: str, mistake: str | None = None):
+    """The task as the host runs it: the pin from a scratch copy (symlinks followed, as NanoAgent's
+    staging copies), then survey and two applies, every output checked; (workspace, pin, last summary)."""
+    workspace, scratch = tmp_path / "workspace", tmp_path / "scratch"
+    unpack(files, workspace)
+    shutil.copytree(workspace, scratch)
+    organizer.RUN = None
+    reference = organizer.pin_layout(OrganizeInput(folder=folder), scratch)
+    assert verifier.verify_output("pin_layout", OrganizeInput(folder=folder), reference, str(scratch))["valid"]
+    survey = organizer.survey(OrganizeInput(folder=folder), workspace)
+    assert verifier.verify_output("survey", OrganizeInput(folder=folder), survey, str(workspace))["valid"]
+    outputs = {"survey": {"rows": plain_rows(survey)}}
+    agent().decide(outputs, folder, mistake)
+    last = survey.summary
+    for batch in (outputs["batch0"], outputs["batch1"]):
+        given = ApplyInput(folder=folder, moves=[Move(**move) for move in batch["moves"]], deletes=batch["deletes"])
+        applied = organizer.apply(given, workspace)
+        check = verifier.verify_output("apply", given, applied, str(workspace))
+        assert check["valid"], check["message"]
+        last = applied.summary
+    organizer.RUN = None
+    return workspace, reference, last
+
+
+def judge(workspace: Path, reference, output, folder: str) -> dict:
+    """verify_task, called twice as NanoAgent does: the two verdicts must agree."""
+    first = verifier.verify_task(TASK, OrganizeInput(folder=folder), output, reference, str(workspace))
+    assert first == verifier.verify_task(TASK, OrganizeInput(folder=folder), output, reference, str(workspace))
+    return first
+
+
+def failed(verdict: dict) -> list[str]:
+    return [entry["id"] for entry in verdict["details"]["constraints"] if entry["ok"] is False]

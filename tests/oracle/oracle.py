@@ -6,6 +6,7 @@ step by step; a difference is either a bug in one of them or a gap in RULES.md, 
 
 from __future__ import annotations
 
+import codecs
 import datetime
 import hashlib
 import io
@@ -32,12 +33,37 @@ for group, names in (
 ):
     for name in names.split():
         TEXT[name] = group
-NORMAL = {"markdown": "md", "yml": "yaml", "htm": "html", "ndjson": "jsonl"}
-TABLE = {"pdf", "png", "jpg", "gif", "webp", "wav", "avi", "heic", "avif", "mov", "m4a", "cr3", "mp4", "tiff", "raf", "mp3", "flac", "ogg", "webm", "mkv", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "zip", "gz", "tar", "7z", "rar"}
-NEVER_KEPT = {"jpeg", "jpe", "jfif", "tif"}
+NORMAL = {"markdown": "md", "yml": "yaml", "htm": "html", "ndjson": "jsonl", "jpeg": "jpg", "jpe": "jpg", "jfif": "jpg", "tif": "tiff"}
+FAMILIES = {
+    "Word": ("documents", "docx", {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml": "docx",
+        "application/vnd.ms-word.document.macroEnabled.main+xml": "docm",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml": "dotx",
+        "application/vnd.ms-word.template.macroEnabledTemplate.main+xml": "dotm",
+    }),
+    "Excel": ("spreadsheets", "xlsx", {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml": "xlsx",
+        "application/vnd.ms-excel.sheet.macroEnabled.main+xml": "xlsm",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml": "xltx",
+        "application/vnd.ms-excel.template.macroEnabled.main+xml": "xltm",
+        "application/vnd.ms-excel.addin.macroEnabled.main+xml": "xlam",
+        "application/vnd.ms-excel.sheet.binary.macroEnabled.main": "xlsb",
+    }),
+    "PowerPoint": ("presentations", "pptx", {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml": "pptx",
+        "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml": "pptm",
+        "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml": "potx",
+        "application/vnd.ms-powerpoint.template.macroEnabled.main+xml": "potm",
+        "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml": "ppsx",
+        "application/vnd.ms-powerpoint.slideshow.macroEnabled.main+xml": "ppsm",
+        "application/vnd.ms-powerpoint.addin.macroEnabled.main+xml": "ppam",
+    }),
+}  # fmt: skip
+OFFICE_EXTENSIONS = {ext for _group, _plain, types in FAMILIES.values() for ext in types.values()}
+TABLE = {"pdf", "png", "jpg", "gif", "webp", "wav", "avi", "heic", "avif", "mov", "m4a", "cr3", "mp4", "tiff", "raf", "mp3", "flac", "ogg", "webm", "mkv", "zip", "gz", "tar", "7z", "rar", "ts", "epub", "odt", "ods", "odp", "jpeg", "jpe", "jfif", "tif"} | OFFICE_EXTENSIONS
+CP1252_UNDEFINED = {0x81, 0x8D, 0x8F, 0x90, 0x9D}
 JUNK_NAMES = {".ds_store", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", "desktop.ini", "icon\r"}
 MONTH = {name: number + 1 for number, name in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
-FOUR_MIB = 4 * 1024 * 1024
 ONE_MIB = 1024 * 1024
 
 
@@ -61,26 +87,98 @@ def hidden(name: str) -> bool:
 
 
 def kept_as_other(ext: str) -> bool:
-    return bool(ext) and ext not in TEXT and ext not in NORMAL and ext not in TABLE and ext not in NEVER_KEPT
+    """A claimed extension that is not a text extension (normalized) and not in the table's list."""
+    return bool(ext) and NORMAL.get(ext, ext) not in TEXT and ext not in TABLE
 
 
-def as_text(data: bytes):
+def wide_text(data: bytes):
+    """Row 10: the first byte-order mark of FF FE 00 00, 00 00 FE FF, FF FE, FE FF decides the encoding."""
+    for mark, codec in ((b"\xff\xfe\x00\x00", "utf_32_le"), (b"\x00\x00\xfe\xff", "utf_32_be"), (b"\xff\xfe", "utf_16_le"), (b"\xfe\xff", "utf_16_be")):
+        if data[: len(mark)] == mark:
+            try:
+                text = codecs.decode(data[len(mark) :], codec)
+            except UnicodeDecodeError:
+                return None
+            return None if "\0" in text else text
+    return None
+
+
+def utf8_text(data: bytes):
+    """Row 19: an optional UTF-8 BOM, then UTF-8 with no NUL."""
     body = data[3:] if data[:3] == b"\xef\xbb\xbf" else data
     try:
-        text = body.decode("utf-8")
+        text = codecs.decode(body, "utf_8")
     except UnicodeDecodeError:
         return None
     return None if "\0" in text else text
+
+
+def legacy_text(data: bytes, ext: str):
+    """Row 20: a claimed text extension, no NUL, Windows-1252 without its five undefined bytes, and no
+    control character but tab, line feed, form feed and carriage return."""
+    if NORMAL.get(ext, ext) not in TEXT or 0 in data or any(byte in CP1252_UNDEFINED for byte in data):
+        return None
+    text = codecs.decode(data, "cp1252")
+    if any((ord(char) < 32 and char not in "\t\n\f\r") or char == "\x7f" for char in text):
+        return None
+    return text
+
+
+def as_text(data: bytes, ext: str):
+    """The text a text row reads: row 10, else 19, else 20 (a file the rules typed md matched one)."""
+    for reader in (wide_text, utf8_text):
+        text = reader(data)
+        if text is not None:
+            return text
+    return legacy_text(data, ext)
+
+
+def nesting(text: str) -> int:
+    """How deep arrays and objects nest outside JSON strings, by a plain scan."""
+    depth = deepest = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif char in "]}":
+            depth -= 1
+    return deepest
+
+
+def rfc_json(text: str) -> bool:
+    if nesting(text) > 512:
+        return False
+
+    def refuse(_constant):
+        raise ValueError("not RFC 8259")
+
+    try:
+        json.loads(text, parse_constant=refuse, parse_int=lambda digits: 0)
+    except (ValueError, RecursionError):
+        return False
+    return True
 
 
 def lines_of(text: str) -> list[str]:
     return [line.removesuffix("\r") for line in text.split("\n")]
 
 
-def text_type(text: str, ext: str):
-    ext = NORMAL.get(ext, ext)
+def text_type(text: str, claimed_ext: str):
+    ext = NORMAL.get(claimed_ext, claimed_ext)
     if ext in TEXT:
         return TEXT[ext], ext, ext
+    if kept_as_other(claimed_ext):
+        return "other", claimed_ext, claimed_ext
     body = text.lstrip()
     first = lines_of(text)[0]
     if body.startswith("<svg"):
@@ -93,12 +191,8 @@ def text_type(text: str, ext: str):
         return "documents", "html", "html"
     if body.startswith("{\\rtf"):
         return "documents", "rtf", "rtf"
-    if body[:1] in ("{", "["):
-        try:
-            json.loads(text)
-            return "data", "json", "json"
-        except (ValueError, RecursionError):
-            pass
+    if body[:1] in ("{", "[") and rfc_json(text):
+        return "data", "json", "json"
     if first.startswith("# ") or first == "---":
         return "documents", "md", "md"
     filled = [line for line in lines_of(text) if line.strip() != ""]
@@ -110,12 +204,28 @@ def text_type(text: str, ext: str):
     return "documents", "txt", "txt"
 
 
+def end_of_zip(data: bytes):
+    """The zip as RULES reads it: up to the last end record (in the final 65,557 bytes) whose comment
+    length reaches exactly the end of the file, with that comment dropped, so zipfile reads that record;
+    None when there is no such record or it points to ZIP64."""
+    for at in range(len(data) - 22, max(-1, len(data) - 65557 - 1), -1):
+        if data[at : at + 4] == b"PK\x05\x06" and at + 22 + struct.unpack("<H", data[at + 20 : at + 22])[0] == len(data):
+            if struct.unpack("<I", data[at + 16 : at + 20])[0] == 0xFFFFFFFF:
+                return None
+            return data[: at + 20] + b"\x00\x00"
+    return None
+
+
 def zip_names(data: bytes):
+    plain = end_of_zip(data)
+    if plain is None:
+        return None
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            return archive.infolist()
+        with zipfile.ZipFile(io.BytesIO(plain)) as archive:
+            infos = archive.infolist()
     except (zipfile.BadZipFile, OSError, ValueError, EOFError, KeyError, NotImplementedError):
         return None
+    return infos
 
 
 def zip_entry(data: bytes, name: str):
@@ -130,10 +240,103 @@ def zip_entry(data: bytes, name: str):
             if info.file_size > ONE_MIB or info.compress_size > ONE_MIB:
                 return None
             try:
-                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                with zipfile.ZipFile(io.BytesIO(end_of_zip(data))) as archive:
                     return archive.read(info)
             except (zipfile.BadZipFile, OSError, ValueError, EOFError, KeyError, NotImplementedError):
                 return None
+    return None
+
+
+MPEG_KBITS = {
+    ("1", 1): [32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+    ("1", 2): [32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+    ("1", 3): [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+    ("2", 1): [32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+    ("2", 2): [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    ("2", 3): [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+}
+MPEG_RATES = {"1": [44100, 48000, 32000], "2": [22050, 24000, 16000], "2.5": [11025, 12000, 8000]}
+
+
+def frame(data: bytes, at: int):
+    """An MPEG audio frame header at `at`: (version, layer, length), or None."""
+    if len(data) < at + 4:
+        return None
+    (word,) = struct.unpack(">I", data[at : at + 4])
+    if word >> 21 != 0x7FF:
+        return None
+    version = {0b11: "1", 0b10: "2", 0b00: "2.5"}.get((word >> 19) & 3)
+    layer = {0b11: 1, 0b10: 2, 0b01: 3}.get((word >> 17) & 3)
+    rate_index, bitrate_index, padding = (word >> 10) & 3, (word >> 12) & 15, (word >> 9) & 1
+    if version is None or layer is None or bitrate_index in (0, 15) or rate_index == 3:
+        return None
+    bits = MPEG_KBITS[("1" if version == "1" else "2"), layer][bitrate_index - 1] * 1000
+    rate = MPEG_RATES[version][rate_index]
+    if layer == 1:
+        length = (12 * bits // rate + padding) * 4
+    elif layer == 3 and version != "1":
+        length = 72 * bits // rate + padding
+    else:
+        length = 144 * bits // rate + padding
+    return version, layer, length
+
+
+def mpeg(data: bytes) -> bool:
+    first = frame(data, 0)
+    if first is None:
+        return False
+    if len(data) < first[2] + 4:
+        return True
+    second = frame(data, first[2])
+    return second is not None and second[:2] == first[:2]
+
+
+def classic_quicktime(data: bytes) -> bool:
+    if len(data) < 8 or data[4:8] not in (b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot"):
+        return False
+    (size,) = struct.unpack(">I", data[:4])
+    if size == 0:
+        return True
+    if size == 1:
+        return len(data) >= 16 and 16 <= struct.unpack(">Q", data[8:16])[0] <= len(data)
+    return 8 <= size <= len(data)
+
+
+def transport_stream(data: bytes) -> bool:
+    packets = min(20, len(data) // 188)
+    return packets >= 3 and all(data[188 * k] == 0x47 for k in range(packets))
+
+
+def content_types(data: bytes, part: str):
+    """The ContentType of the first Override for `/part`, else of the first Default for its extension."""
+    content = zip_entry(data, "[Content_Types].xml")
+    if content is None:
+        return None
+    try:
+        document = minidom.parseString(content)
+    except Exception:  # noqa: BLE001 - not XML: no content type
+        return None
+    for element in document.getElementsByTagName("Override"):
+        if element.getAttribute("PartName").lower() == "/" + part.lower():
+            return element.getAttribute("ContentType")
+    extension = part.rsplit(".", 1)[1].lower()
+    for element in document.getElementsByTagName("Default"):
+        if element.getAttribute("Extension").lower() == extension:
+            return element.getAttribute("ContentType")
+    return None
+
+
+def office(data: bytes, names: list[str], ext: str):
+    for family, parts in (("Word", ["word/document.xml"]), ("Excel", ["xl/workbook.xml", "xl/workbook.bin"]), ("PowerPoint", ["ppt/presentation.xml"])):
+        present = [part for part in parts if part in names]
+        if not present:
+            continue
+        group, plain, types = FAMILIES[family]
+        found = content_types(data, present[0])
+        chosen = {kind.lower(): value for kind, value in types.items()}.get((found or "").lower())
+        if chosen is None:
+            chosen = ext if ext in types.values() else plain
+        return group, chosen, chosen
     return None
 
 
@@ -169,19 +372,16 @@ def kind_of(data: bytes, name: str):
         if major == b"crx ":
             return "images", "raw", "cr3"
         return "video", "mp4", "mp4"
+    if classic_quicktime(data):
+        return "video", "mov", "mov"
     if data[:4] in (b"II*\0", b"MM\0*"):
         return ("images", "raw", ext) if ext in RAW else ("images", "tiff", "tiff")
     if data[:15] == b"FUJIFILMCCD-RAW":
         return "images", "raw", "raf"
-    if (data[:3] == b"ID3" and len(data) > 3 and data[3] in (2, 3, 4)) or (
-        len(data) >= 3
-        and data[0] == 0xFF
-        and (data[1] >> 5) == 0b111
-        and ((data[1] >> 3) & 0b11) != 0b01
-        and ((data[1] >> 1) & 0b11) != 0b00
-        and (data[2] >> 4) != 0b1111
-        and ((data[2] >> 2) & 0b11) != 0b11
-    ):
+    text = wide_text(data)
+    if text is not None:
+        return text_type(text, ext)
+    if (data[:3] == b"ID3" and len(data) > 3 and data[3] in (2, 3, 4)) or mpeg(data):
         return "audio", "mp3", "mp3"
     if data[:4] == b"fLaC":
         return "audio", "flac", "flac"
@@ -192,9 +392,9 @@ def kind_of(data: bytes, name: str):
     if data[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
         infos = zip_names(data) or []
         names = [info.filename for info in infos]
-        for part, group, kind in (("word/document.xml", "documents", "docx"), ("xl/workbook.xml", "spreadsheets", "xlsx"), ("ppt/presentation.xml", "presentations", "pptx")):
-            if part in names:
-                return group, kind, kind
+        found = office(data, names, ext)
+        if found:
+            return found
         if "mimetype" in names:
             content = zip_entry(data, "mimetype")
             mimes = {
@@ -216,9 +416,13 @@ def kind_of(data: bytes, name: str):
         return "archives", "7z", "7z"
     if data[:6] == b"Rar!\x1a\x07":
         return "archives", "rar", "rar"
-    text = as_text(data)
+    text = utf8_text(data)
+    if text is None:
+        text = legacy_text(data, ext)
     if text is not None:
         return text_type(text, ext)
+    if transport_stream(data):
+        return "video", "ts", "ts"
     return ("other", ext, ext) if kept_as_other(ext) else ("other", "bin", "bin")
 
 
@@ -234,12 +438,12 @@ def calendar(year: int, month: int, day: int, low: int, high: int):
         return None
 
 
-def exif_original(tiff_or_exif: bytes):
-    """Pillow reads the TIFF; the Exif IFD's 9003 as an ASCII string, or None."""
+def exif_original(tiff_or_exif: bytes, in_first_ifd: bool = False):
+    """Pillow reads the TIFF; the Exif IFD's 9003 (or IFD0's, for a CR3 CMT2 box) as an ASCII string, or None."""
     try:
         exif = Image.Exif()
         exif.load(tiff_or_exif)
-        value = exif.get_ifd(0x8769).get(0x9003)
+        value = exif.get(0x9003) if in_first_ifd else exif.get_ifd(0x8769).get(0x9003)
     except Exception:  # noqa: BLE001 - any unreadable TIFF gives no date
         return None
     if isinstance(value, bytes):
@@ -264,7 +468,7 @@ def jpeg_date(data: bytes):
         if marker in (0xDA, 0xD9):
             return None
         (length,) = struct.unpack(">H", data[at + 2 : at + 4])
-        if length < 2:
+        if length < 2 or at + 2 + length > len(data):
             return None
         segment = data[at + 4 : at + 2 + length]
         if marker == 0xE1 and segment[:6] == b"Exif\0\0":
@@ -321,10 +525,25 @@ def webp_date(data: bytes):
 
 
 def pdf_date(data: bytes):
-    found = list(re.finditer(rb"/CreationDate\s*\(", data))
-    if not found:
-        return None
-    value = data[found[-1].end() : found[-1].end() + 64].split(b")")[0].decode("latin-1")
+    """The document information dictionary's CreationDate: the last /Info N G R names it; written out
+    plainly, its literal decides; otherwise the last CreationDate literal in the file."""
+    where = data
+    references = re.findall(rb"/Info\s+([0-9]+)\s+([0-9]+)\s+R", data)
+    if references:
+        number, generation = references[-1]
+        headers = [match.end() for match in re.finditer(rb"(?<![0-9])" + number + rb"\s+" + generation + rb"\s+obj\b", data)]
+        if headers:
+            close = data.find(b"endobj", headers[-1])
+            if close >= 0:
+                where = data[headers[-1] : close]
+                inside = re.search(rb"/CreationDate\s*\(", where)
+                return pdf_value(where, inside) if inside else None
+    found = list(re.finditer(rb"/CreationDate\s*\(", where))
+    return pdf_value(where, found[-1]) if found else None
+
+
+def pdf_value(data: bytes, literal):
+    value = data[literal.end() : literal.end() + 64].split(b")")[0].decode("latin-1")
     parts = re.match(r"(?:D:)?([0-9]{4})([0-9]{2})([0-9]{2})", value)
     return calendar(*map(int, parts.groups()), 1971, 2099) if parts else None
 
@@ -475,17 +694,52 @@ def heif_item_date(data: bytes):
         return None
 
 
-def searched_date(data: bytes):
-    found = re.search(rb"Exif\x00\x00(?=II\*\x00|MM\x00\*)", data[:FOUR_MIB])
-    return exif_original(data[found.start() :]) if found else None
+def boxes_in(data: bytes, start: int, end: int):
+    at = start
+    while at + 8 <= end:
+        size, kind = struct.unpack(">I4s", data[at : at + 8])
+        header = 8
+        if size == 1:
+            if at + 16 > end:
+                return
+            size, header = struct.unpack(">Q", data[at + 8 : at + 16])[0], 16
+        elif size == 0:
+            size = end - at
+        if size < header or at + size > end:
+            return
+        yield kind, at + header, at + size
+        at += size
+
+
+def cr3_date(data: bytes):
+    """moov -> the Canon uuid box -> CMT2 (tag 9003 in its first IFD), else CMT1 -> Exif IFD -> 9003."""
+    canon = uuid_bytes("85c0b687-820f-11e0-8111-f4ce462b6a48")
+    for kind, start, end in boxes_in(data, 0, len(data)):
+        if kind != b"moov":
+            continue
+        for inner, body, body_end in boxes_in(data, start, end):
+            if inner == b"uuid" and data[body : body + 16] == canon:
+                parts = {}
+                for name, part, part_end in boxes_in(data, body + 16, body_end):
+                    parts.setdefault(name, data[part:part_end])
+                found = exif_original(b"Exif\0\0" + parts[b"CMT2"], in_first_ifd=True) if b"CMT2" in parts else None
+                if found is None and b"CMT1" in parts:
+                    found = exif_original(b"Exif\0\0" + parts[b"CMT1"])
+                return found
+        return None
+    return None
+
+
+def uuid_bytes(text: str) -> bytes:
+    return bytes.fromhex(text.replace("-", ""))
 
 
 def front_matter_date(text: str):
-    lines = lines_of(text)
-    if not lines or lines[0] != "---":
+    lines = lines_of("\n".join(text.split("\n")[:1000]))
+    if lines[0] != "---":
         return None
     for line in lines[1:]:
-        if line.strip() == "---":
+        if line.strip(" \t") == "---":
             return None
         if line.startswith("date:"):
             value = line[len("date:") :].strip(" \t").strip("'\"")
@@ -494,7 +748,7 @@ def front_matter_date(text: str):
     return None
 
 
-def embedded_date(kind: str, ext: str, data: bytes):
+def embedded_date(kind: str, ext: str, data: bytes, claimed_of_ext: str):
     if kind == "jpg":
         return jpeg_date(data)
     if kind == "tiff" or (kind == "raw" and data[:4] in (b"II*\0", b"MM\0*")):
@@ -502,21 +756,21 @@ def embedded_date(kind: str, ext: str, data: bytes):
     if kind in ("heic", "avif"):
         return heif_item_date(data)
     if kind == "raw" and ext == "cr3":
-        return searched_date(data)
+        return cr3_date(data)
     if kind == "webp":
         return webp_date(data)
     if kind == "png":
         return png_date(data)
     if kind == "pdf":
         return pdf_date(data)
-    if kind in ("docx", "xlsx", "pptx"):
+    if kind in OFFICE_EXTENSIONS:
         return xml_date(data, "docProps/core.xml", "dcterms:created")
     if kind in ("odt", "ods", "odp"):
         return xml_date(data, "meta.xml", "meta:creation-date")
     if kind in ("mp4", "mov", "m4a"):
         return media_date(data)
     if kind == "md":
-        text = as_text(data)
+        text = as_text(data, claimed_of_ext)
         return front_matter_date(text) if text is not None else None
     return None
 
@@ -579,7 +833,7 @@ def facts(path: str, data: bytes) -> dict:
     name = path.split("/")[-1]
     group, kind, ext = kind_of(data, name)
     named, made_slug = name_date_and_slug(name, ext)
-    date = embedded_date(kind, ext, data) or named
+    date = embedded_date(kind, ext, data, claimed(name)) or named
     is_junk = junk(name)
     base = None
     if not is_junk and data:
@@ -598,28 +852,58 @@ def caseless(path: str) -> str:
     return unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold())
 
 
+def copy_marker(name: str, ext: str) -> bool:
+    """RULES §4: not in scheme form, and slug step 3 or 4 strips something."""
+    if SCHEME.match(name):
+        return False
+    text = stem(name, ext)
+    dated = date_in(text)
+    if dated:
+        text = text[: dated[1][0]] + text[dated[1][1] :]
+    text = "".join(char for char in unicodedata.normalize("NFKD", text) if char.isascii()).lower()
+    return text.startswith("copy of ") or TAIL.search(text) is not None
+
+
+def names_its_type(name: str, ext: str) -> bool:
+    aliases = {"jpg": ["jpeg", "jpe", "jfif"], "tiff": ["tif"], "md": ["markdown"], "yaml": ["yml"], "html": ["htm"], "jsonl": ["ndjson"], "tar.gz": ["tgz"]}
+    return any(name.lower().endswith("." + tail) for tail in [ext, *aliases.get(ext, [])])
+
+
 def survey_folder(root: str):
-    """(files that take part, every existing path) under `root`, by RULES §1, with os.walk."""
-    files, paths = [], []
+    """(files that take part, every path that is taken) under `root`, by RULES §1 and §5, with os.walk:
+    hidden folders are not entered; a folder holding no file and no hidden entry is not taken."""
+    files, folders_seen, holding = [], [], set()
     for here, folders, names in os.walk(root):
         relative = os.path.relpath(here, root)
         prefix = "" if relative == "." else relative.replace(os.sep, "/") + "/"
         for folder in list(folders):
-            paths.append(prefix + folder)
-            if hidden(folder) or os.path.islink(os.path.join(here, folder)):
+            if folder.startswith("."):
                 folders.remove(folder)
+                holding.add(prefix + folder)
+            else:
+                folders_seen.append(prefix + folder)
         for name in names:
-            paths.append(prefix + name)
-            if not hidden(name) and os.path.isfile(os.path.join(here, name)) and not os.path.islink(os.path.join(here, name)):
+            if not hidden(name):
                 files.append(prefix + name)
-    return sorted(files), sorted(paths)
+            holding.add(prefix + name)
+    alive = set()
+    for path in holding:
+        parts = path.split("/")
+        alive.update("/".join(parts[:end]) for end in range(1, len(parts)))
+    taken = sorted(files + [folder for folder in folders_seen if folder in alive])
+    return sorted(files), taken
 
 
 def organize(root: str) -> dict:
     """The rules applied to the folder at `root`: every file's facts, in order, and every step."""
     files, paths = survey_folder(root)
     found = [facts(path, open(os.path.join(root, path), "rb").read()) for path in files]  # noqa: SIM115
-    order = sorted(found, key=lambda item: (0 if item["conforming"] else 1, item["path"]))
+
+    def place(item):
+        name = item["path"].split("/")[-1]
+        return (not item["conforming"], copy_marker(name, item["ext"]), not names_its_type(name, item["ext"]), item["path"].count("/"), item["path"])
+
+    order = sorted(found, key=place)
     taken = {caseless(path) for path in paths if caseless(path) == "organized" or caseless(path).startswith("organized/")}
     kept_at: dict[str, int] = {}
     steps = []

@@ -239,20 +239,25 @@ def organized_folder(seed: int, folder: str = "Photos", stays: int = 30, new: in
     return files
 
 
-def write_tar(files: dict[str, bytes], destination: Path) -> None:
-    """Store `files` as a reproducible tar: sorted, mtime 1,700,000,000, uid/gid 0, modes 0644/0755."""
+def write_tar(files: dict[str, bytes], destination: Path, links: dict[str, str] | None = None, empty: tuple[str, ...] = ()) -> None:
+    """Store `files` as a reproducible tar: sorted, mtime 1,700,000,000, uid/gid 0, modes 0644/0755;
+    `links` adds symlinks (path -> relative target) and `empty` empty folders."""
+    links = links or {}
     buffer = io.BytesIO()
-    folders: set[str] = set()
-    for path in files:
+    folders: set[str] = set(empty)
+    for path in [*files, *links, *empty]:
         parts = path.split("/")
         folders.update("/".join(parts[:end]) for end in range(1, len(parts)))
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
-        for name in sorted(folders | set(files)):
+        for name in sorted(folders | set(files) | set(links)):
             info = tarfile.TarInfo(name)
             info.mtime, info.uid, info.gid, info.uname, info.gname = 1_700_000_000, 0, 0, "", ""
             if name in files:
                 info.size, info.mode = len(files[name]), 0o644
                 archive.addfile(info, io.BytesIO(files[name]))
+            elif name in links:
+                info.type, info.linkname, info.mode = tarfile.SYMTYPE, links[name], 0o777
+                archive.addfile(info)
             else:
                 info.type, info.mode = tarfile.DIRTYPE, 0o755
                 archive.addfile(info)

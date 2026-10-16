@@ -1,4 +1,4 @@
-"""The verifier: tool checks, and the task check's 11 constraints, each broken on its own."""
+"""The verifier: tool checks, and the task check's 14 constraints, each broken on its own."""
 
 from __future__ import annotations
 
@@ -67,8 +67,9 @@ def test_a_gold_run_holds_every_constraint(gold) -> None:
     verdict = judge(workspace, reference, output)
     assert verdict["valid"] and verdict["score"] == 1.0, verdict["message"]
     assert [entry["id"] for entry in verdict["details"]["constraints"]] == [
-        "answer-key", "submitted-folder", "folder-present", "every-file-kept", "moved-to-rules-path", "duplicates-and-junk-removed",
-        "others-untouched", "nothing-extra", "organized-by-rules", "summary-matches", "saved-back",
+        "answer-key", "submitted-folder", "folder-present", "plain-entries", "every-file-kept", "moved-to-rules-path",
+        "duplicates-and-junk-removed", "others-untouched", "hidden-untouched", "outside-untouched", "nothing-extra",
+        "organized-by-rules", "summary-matches", "saved-back",
     ]  # fmt: skip
     assert all(entry["ok"] is True for entry in verdict["details"]["constraints"])
     assert verdict["message"].startswith("Organized Downloads: moved ")
@@ -127,6 +128,22 @@ def break_summary(workspace, reference, output):
     return workspace, reference, dataclasses.replace(output, deleted=output.deleted + 1)
 
 
+def break_plain_entries(workspace, reference, output):
+    (workspace / FOLDER / "link.txt").symlink_to(workspace / FOLDER / first_move(workspace, reference).target)
+    return workspace, reference, output
+
+
+def break_hidden(workspace, reference, output):
+    (workspace / FOLDER / ".stash.txt").write_text("hidden away")
+    return workspace, reference, output
+
+
+def break_outside(workspace, reference, output):
+    (workspace / "Elsewhere").mkdir()
+    (workspace / "Elsewhere" / "moved-out.txt").write_text("moved out of the folder")
+    return workspace, reference, output
+
+
 def break_saved_back(workspace, reference, output):
     crowd = workspace / "Crowd"
     crowd.mkdir()
@@ -139,9 +156,12 @@ BREAKS = {
     "answer-key": break_answer_key,
     "submitted-folder": break_folder,
     "folder-present": break_presence,
+    "plain-entries": break_plain_entries,
     "every-file-kept": break_contents,
     "moved-to-rules-path": break_placement,
     "duplicates-and-junk-removed": break_deletes,
+    "hidden-untouched": break_hidden,
+    "outside-untouched": break_outside,
     "nothing-extra": break_extra,
     "summary-matches": break_summary,
     "saved-back": break_saved_back,
@@ -153,11 +173,14 @@ def test_each_constraint_fails_when_broken_and_the_score_drops(gold, constraint:
     verdict = judge(*BREAKS[constraint](*gold))
     assert not verdict["valid"] and verdict["score"] < 1.0, verdict["message"]
     assert constraint in failed(verdict), (failed(verdict), verdict["message"])
-    assert verdict["message"].split(".")[0].endswith("checks failed") or "checks failed" in verdict["message"]
-    if constraint in ("answer-key", "folder-present"):
+    if constraint == "plain-entries":
+        assert verdict["message"].startswith("The rules refuse your File Organizer agent folder as it is") and "link.txt is a symlink" in verdict["message"]
+    else:
+        assert "checks failed" in verdict["message"]
+    if constraint in ("answer-key", "folder-present", "plain-entries"):
         assert verdict["score"] == 0.0
-        later = [entry for entry in verdict["details"]["constraints"][3:]]
-        assert all(entry["ok"] is None for entry in later)
+        first = ("answer-key", "submitted-folder", "folder-present", "plain-entries")
+        assert all(entry["ok"] is None for entry in verdict["details"]["constraints"] if entry["id"] not in first)
 
 
 def test_others_untouched_fails_when_a_file_beyond_the_quota_changes(tmp_path: Path) -> None:
@@ -171,7 +194,7 @@ def test_others_untouched_fails_when_a_file_beyond_the_quota_changes(tmp_path: P
 
 def test_organized_by_rules_rereads_the_bytes(tmp_path: Path) -> None:
     jpeg = builders.jpeg(3, "2019-07-14")
-    workspace, reference, output = run(tmp_path, {"Downloads/photo.jpg": jpeg, "Downloads/x.txt": b"x\n"})
+    workspace, reference, output = run(tmp_path, {"Downloads/photo.jpg": jpeg, "Downloads/x": b"x\n"})
     files = list(reference.files)
     photo = next(index for index, file in enumerate(files) if file.path == "photo.jpg")
     wrong_base = "organized/images/png/2019/2019-07-14_photo.png"  # a forged answer key that calls the JPEG a PNG
@@ -268,3 +291,69 @@ def test_an_empty_quota_is_valid_only_with_a_true_summary(tmp_path: Path) -> Non
     assert verdict["valid"] and verdict["message"] == "Done is already organized: its one file is in place."
     fake = OrganizeOutput(folder="Done", files=1, moved=1, deleted=0, stayed=1, left=0, remaining=0)
     assert not judge(workspace, reference, fake, folder="Done")["valid"]
+
+
+GUARDED = """
+import contextlib, dataclasses, enum, importlib, importlib.util, json, os, socket, subprocess, sys
+import slimconfig
+MODULES = ["__future__", "collections", "dataclasses", "decimal", "difflib", "enum", "fractions", "functools", "hashlib",
+           "itertools", "json", "math", "operator", "pathlib", "re", "statistics", "string", "textwrap", "typing", "unicodedata"]
+for module in MODULES:
+    importlib.import_module(module)
+root, samples = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("contract", root + "/contract.py")
+contract = importlib.util.module_from_spec(spec)
+sys.modules["contract"] = contract
+spec.loader.exec_module(contract)
+
+class NoNewImports:
+    def find_spec(self, name, path=None, target=None):
+        if name.startswith("plugin_verifier."):
+            return None
+        raise ImportError(f"plugin verifiers may not import {name!r}")
+
+spec = importlib.util.spec_from_file_location("plugin_verifier", root + "/verifier/__init__.py", submodule_search_locations=[root + "/verifier"])
+package = importlib.util.module_from_spec(spec)
+sys.modules["plugin_verifier"] = package
+sys.meta_path.insert(0, NoNewImports())
+spec.loader.exec_module(package)
+from pathlib import Path
+facts = {}
+for path in sorted(Path(samples).iterdir()):
+    fact = sys.modules["plugin_verifier.walk"].describe(path.name, path.read_bytes())
+    facts[path.name] = [fact.group, fact.type, fact.ext, fact.date]
+print(json.dumps(facts))
+"""
+
+
+def test_the_rules_need_no_new_imports_in_the_verifier(tmp_path: Path) -> None:
+    """NanoAgent's verifier process refuses every import once it starts, codec modules included: the
+    rules must decode UTF-16, UTF-32 and Windows-1252 text, and read every format, without one."""
+    import json
+    import subprocess
+    import sys
+
+    from plugin.walk import describe
+
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    for index, (kind, build) in enumerate(sorted(builders.SAMPLES.items())):
+        (samples / f"s{index}.{builders.natural_ext(kind)}").write_bytes(build(index, "2019-07-14"))
+    texts = {
+        "utf16.txt": b"\xff\xfe" + "Notes from Tuesday\r\n".encode("utf-16-le"),
+        "utf16be.md": b"\xfe\xff" + "---\ndate: 2011-03-04\n---\n".encode("utf-16-be"),
+        "utf32.csv": b"\xff\xfe\x00\x00" + "a,b\n1,2\n3,4\n".encode("utf-32-le"),
+        "utf32be.txt": b"\x00\x00\xfe\xff" + "wide\n".encode("utf-32-be"),
+        "ventas.csv": "Nombre,Ciudad\nJosé,Bogotá\nRenée,Zürich\n".encode("cp1252"),
+        "quotes.html": "<html>“crème” – €5</html>".encode("cp1252"),
+        "deep": ("[" * 512 + "]" * 512).encode(),
+    }
+    for name, data in texts.items():
+        (samples / name).write_bytes(data)
+    done = subprocess.run([sys.executable, "-I", "-c", GUARDED, str(Path(verifier.__file__).parents[1]), str(samples)], capture_output=True, text=True, timeout=120, check=False)
+    assert done.returncode == 0, done.stderr[-2000:]
+    guarded = json.loads(done.stdout)
+    for path in sorted(samples.iterdir()):
+        fact = describe(path.name, path.read_bytes())
+        assert guarded[path.name] == [fact.group, fact.type, fact.ext, fact.date], path.name
+    assert guarded["utf16.txt"][:2] == ["documents", "txt"] and guarded["ventas.csv"][:2] == ["spreadsheets", "csv"]

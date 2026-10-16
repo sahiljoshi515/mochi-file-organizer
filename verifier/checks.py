@@ -3,9 +3,8 @@
 import json
 from pathlib import Path
 
-from .layout import STATE_DIR
+from .walk import STATE_DIR, STATE_FILE
 
-STATE_FILE = "state.json"
 SHOWN = 10
 
 

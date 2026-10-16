@@ -7,7 +7,9 @@ Every case runs the organize-folder task through NanoAgent's real task runner wi
 (~/mochi-dev/harness/scripted_task.py, or tests/test_cases.py without NanoAgent): survey, a python step
 that decides the rows by the instructions (tests/cases/agent.py, inlined), apply in calls of 30, submit.
 Gold cases must be valid with score 1.0; each wrong case makes one mistake and must be invalid with the
-message of the first constraint it breaks.
+message of the first constraint it breaks. The review's red-team tampering (hidden entries, files outside
+the folder, empty folders, symlinks, unreadable and special files) is replayed by the wrong_* cases whose
+python step runs after the applies.
 """
 
 from __future__ import annotations
@@ -63,9 +65,9 @@ def pick(profile: str, folder: str, one_run: bool) -> tuple[int, dict[str, bytes
     raise SystemExit(f"no seed suits {profile}")
 
 
-def save_folder(name: str, files: dict[str, bytes]) -> str:
+def save_folder(name: str, files: dict[str, bytes], links: dict[str, str] | None = None, empty: tuple[str, ...] = ()) -> str:
     plain = FOLDERS / f"{name}.tar"
-    write_tar(files, plain)
+    write_tar(files, plain, links, empty)
     packed = FOLDERS / f"{name}.tar.gz"
     with gzip.GzipFile(packed, "wb", mtime=0, compresslevel=9) as out:
         out.write(plain.read_bytes())
@@ -100,6 +102,34 @@ def moved_file(folder: str, body: str) -> str:
         f"root = {root_code(folder)}\n"
         "target, source = root / move['to'], root / move['from']\n" + body
     )
+
+
+# Python run after the applies, with `root`, `rows` (the run's rows by i), `moved` (sha256 -> where the run
+# moved those bytes) and `duplicate` (a duplicate the run deleted: its old name and its bytes) bound.
+RUN_FACTS = (
+    "import os\n"
+    "state = json.loads((workspace / '.file-organizer' / 'state.json').read_text())\n"
+    "rows = {row['i']: row for row in state['rows']}\n"
+    "moved = {rows[entry['i']]['sha256']: entry['to'] for entry in state['applied'] if entry['kind'] == 'move'}\n"
+    "root = workspace / 'Downloads'\n"
+    "gone = next(entry for entry in state['applied'] if entry['kind'] == 'delete' and rows[entry['i']]['sha256'] in moved)\n"
+    "duplicate = (gone['path'].rpartition('/')[2], (root / moved[rows[gone['i']]['sha256']]).read_bytes())\n"
+)
+TAMPERS = {
+    "hidden_deleted": ("a hidden file the rules leave alone is deleted", "(root / '.git' / 'HEAD').unlink()\n", "hidden entry"),
+    "hidden_modified": ("a hidden file the rules leave alone is changed", "(root / '.vscode' / 'settings.json').write_text('{\"tampered\": true}')\n", "hidden entry"),
+    "hidden_stray_copy": ("a copy of a moved file is left under a hidden name", "(root / '.backup-copy').write_bytes(duplicate[1])\n", "hidden entry"),
+    "duplicate_hidden": ("a duplicate the rules delete ends up under a hidden name instead", "(root / ('.' + duplicate[0])).write_bytes(duplicate[1])\n", "hidden entry"),
+    "duplicate_into_hidden_folder": ("a duplicate the rules delete ends up in a hidden folder instead", "(root / '.trash').mkdir()\n(root / '.trash' / duplicate[0]).write_bytes(duplicate[1])\n", "hidden entr"),
+    "junk_hidden": ("junk the rules delete ends up under a hidden name instead", "(root / '.Thumbs-kept.db').write_bytes(b'junk')\n", "hidden entry"),
+    "outside_deleted": ("a file outside the folder is deleted", "(workspace / 'Notes' / 'keep me.txt').unlink()\n", "outside Downloads"),
+    "outside_modified": ("a file outside the folder is overwritten", "(workspace / 'Notes' / 'keep me.txt').write_text('wiped')\n", "outside Downloads"),
+    "duplicate_moved_outside": ("a duplicate the rules delete is moved out of the folder instead", "(workspace / 'Elsewhere').mkdir()\n(workspace / 'Elsewhere' / duplicate[0]).write_bytes(duplicate[1])\n", "outside Downloads"),
+    "empty_folder_left": ("empty folders are left in the folder", "(root / 'organized' / 'empty-left').mkdir()\n(root / 'old' / 'deeper').mkdir(parents=True)\n", "(an empty folder)"),
+    "junk_replaced_by_folder": ("junk is left as a folder of the same name", "(root / 'Thumbs.db' / 'cache').mkdir(parents=True)\n", "(an empty folder)"),
+    "fifo_added": ("a FIFO appears in the folder", "os.mkfifo(root / 'pipe')\n", "Downloads/pipe is not a regular file or folder"),
+    "unreadable_target": ("a moved file cannot be read at its target", "(root / next(iter(moved.values()))).chmod(0)\n", "cannot be read"),
+}
 
 
 def case(note: str, folder: str, agent_folder: str, flow: list[dict], expect: dict, **extra) -> dict:
@@ -164,6 +194,40 @@ def main() -> int:
     cases["wrong_stray_file"] = case("a file the rules never made appears in the folder", "Downloads", small_tar, steps("Downloads", after="(workspace / 'Downloads' / 'stray.txt').write_text('not from the rules')\n"), wrong("should not be"))
     cases["wrong_copied_not_moved"] = case("a moved file is also copied back to where it was", "Downloads", small_tar, steps("Downloads", after=moved_file("Downloads", "source.parent.mkdir(parents=True, exist_ok=True)\nsource.write_bytes(target.read_bytes())\n")), wrong("should not be"))
     cases["wrong_out_of_quota"] = case("a number outside this run's rows is used in place of a row, which is left undone", "Downloads", multi_tar, steps("Downloads", "out_of_quota"), wrong("checks failed"))
+
+    for name, (note, tamper, contains) in TAMPERS.items():
+        cases[f"wrong_{name}"] = case(note, "Downloads", small_tar, steps("Downloads", after=RUN_FACTS + tamper), wrong(contains))
+    state_rewritten = "(workspace / '.file-organizer' / 'state.json').write_text('{}')\n"
+    cases["gold_state_rewritten"] = case("the run state is rewritten after the last call: the verdict reads the folder", "Downloads", small_tar, steps("Downloads", after=state_rewritten), GOLD)
+
+    emptied = dict(small)
+    emptied["Downloads/Archive/2019/.keep"] = b""
+    cases["gold_empty_folders"] = case(
+        "empty folders (one nested, one named like a target) are removed when the run starts; a folder holding only a hidden file stays",
+        "Downloads",
+        save_folder("small-empty-folders", emptied, empty=("Downloads/empty", "Downloads/nested/deeper/deepest", "Downloads/organized/documents/txt/undated/undated_notes.txt")),
+        steps("Downloads", after="assert not (workspace / 'Downloads' / 'empty').exists() and (workspace / 'Downloads' / 'Archive' / '2019' / '.keep').exists()\n"),
+        GOLD,
+    )
+    long_line = "---\ndate:" + " " * 400_000 + "x\n---\n# Notes\n"
+    texts = {
+        "Downloads/notes.md": long_line.encode(),
+        "Downloads/deep-512": ("[" * 512 + "]" * 512).encode(),
+        "Downloads/deep-513": ("[" * 513 + "]" * 513).encode(),
+        "Downloads/Notes from Tuesday.txt": b"\xff\xfe" + "Notes from Tuesday\r\n".encode("utf-16-le"),
+        "Downloads/ventas.csv": "Nombre,Ciudad\nJosé,Bogotá\nRenée,Zürich\n".encode("cp1252"),
+        "Downloads/Geotag.gpx": b'<?xml version="1.0"?><gpx/>\n',
+        "Downloads/Geotag.kml": b'<?xml version="1.0"?><kml/>\n',
+    }
+    cases["gold_text_edges"] = case("a 400 KB front matter line, JSON 512 and 513 deep, UTF-16 and Windows-1252 text, unlisted text extensions", "Downloads", save_folder("text-edges", texts), steps("Downloads"), GOLD)
+
+    links = {"Downloads/a.txt": b"a\n", "Downloads/target.txt": b"t\n", "Other/p1.txt": b"p1\n"}
+    nothing = {"folder": "Downloads", "files": 0, "moved": 0, "deleted": 0, "stayed": 0, "left": 0, "remaining": 0}
+    refused = [{"tool": "survey", "arguments": {"folder": "Downloads"}, "expect_error": True}, {"tool": "submit", "arguments": nothing}]
+    cases["wrong_symlink_file"] = case("the folder holds a symlink: survey refuses it, and the verdict says the rules refuse the folder", "Downloads", save_folder("symlink-file", links, links={"Downloads/link.txt": "target.txt"}), refused, wrong("Downloads/link.txt is a symlink"))
+    locked = [{"python": "(workspace / 'Downloads' / 'a.txt').chmod(0)\n"}, *refused]
+    cases["wrong_unreadable_input"] = case("a file in the folder cannot be read when the run starts: survey refuses it plainly, and so does the verdict", "Downloads", save_folder("unreadable", {"Downloads/a.txt": b"a\n", "Downloads/b.txt": b"b\n"}), locked, wrong("Downloads/a.txt cannot be read"))
+    cases["wrong_symlink_folder"] = case("the folder holds a symlink to another folder of the member", "Downloads", save_folder("symlink-folder", links, links={"Downloads/linkdir": "../Other"}), refused, wrong("Downloads/linkdir is a symlink"))
 
     for name, data in cases.items():
         (HERE / f"{name}.json").write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")

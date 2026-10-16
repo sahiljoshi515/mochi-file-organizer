@@ -1,6 +1,7 @@
 """pin_layout, the organize-folder task's answer key: the folder is one the task may name, and the pin is
 exactly the rules applied to the agent folder copy it was taken from."""
 
+import re
 from pathlib import Path
 
 from .checks import result
@@ -9,6 +10,7 @@ from .naming import base_path, conforms
 from .plan import ordered, plan
 from .walk import Facts
 
+SHA256 = re.compile(r"[0-9a-f]{64}")
 FACT_FIELDS = ("path", "size", "sha256", "junk", "group", "type", "ext", "date_source", "date_raw", "date", "slug", "base", "conforming")
 STEP_FIELDS = ("action", "reason", "copy_of", "target", "quota")
 
@@ -52,7 +54,7 @@ def verify_output(input_value, output_value, workspace):
     """Re-derive the whole answer key from the scratch copy the reference read, and require it exactly."""
     if output_value.folder != input_value.folder:
         return result(False, "the pin is for another folder")
-    found = look(Path(workspace), input_value.folder)
+    found = look(Path(workspace), input_value.folder, read_kept=True)
     if found.refused:
         return result(False, f"the rules refuse this folder, yet a pin was made: {found.refused}")
     if [file.i for file in output_value.files] != list(range(len(output_value.files))):
@@ -66,6 +68,9 @@ def verify_output(input_value, output_value, workspace):
         return result(False, "the pinned taken paths differ from the folder's")
     if (output_value.pending, output_value.quota) != (len(found.steps) - stays, quota):
         return result(False, "the pinned counts differ from the rules applied to the folder")
+    kept = [(entry.path, entry.folder, entry.size, entry.sha256) for entry in output_value.kept]
+    if kept != [(entry.path, entry.folder, entry.size, found.digests.get(entry.path)) for entry in found.kept]:
+        return result(False, "the pinned snapshot of what the run leaves as it was differs from the agent folder")
     if output_value.entries_after != found.entries_after:
         return result(False, f"the pin projects {output_value.entries_after} entries after the run, the rules {found.entries_after}")
     return result(True, f"{len(found.steps)} files pinned: {stays} in place, {quota} actions this run", files=len(found.steps))
@@ -92,6 +97,12 @@ def rederive(reference):
             return f"{file.path}: conforming is {file.conforming}, its path and base say otherwise"
     if [fact.path for fact in ordered(facts)] != [fact.path for fact in facts]:
         return "the pinned files are not in the rules' order"
+    paths = [entry.path for entry in reference.kept]
+    if paths != sorted(set(paths)):
+        return "the snapshot of what the run leaves as it was is not one entry per path, by path"
+    for entry in reference.kept:
+        if (entry.folder and (entry.size, entry.sha256) != (0, None)) or (not entry.folder and not SHA256.fullmatch(entry.sha256 or "")):
+            return f"{entry.path}: its snapshot entry is malformed"
     steps = plan(facts, reference.taken)
     for file, step in zip(reference.files, steps, strict=True):
         if (file.i, file.action.value, file.reason.value, file.copy_of, file.target, file.quota) != (

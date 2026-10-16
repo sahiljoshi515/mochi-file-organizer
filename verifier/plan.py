@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .naming import path_key, suffixed
-from .walk import Facts
+from .naming import has_copy_marker, names_type, path_key, suffixed
+from .walk import Facts, file_name
 
 QUOTA = 60
 STAY, MOVE, DELETE = "stay", "move", "delete"
@@ -29,9 +29,15 @@ class Step:
     quota: bool
 
 
+def order_key(fact: Facts) -> tuple[bool, bool, bool, int, str]:
+    """RULES §5's order: conforming first, then names without a copy marker, then names that name their
+    type, then fewer folders, then the path by code point."""
+    name = file_name(fact.path)
+    return (not fact.conforming, has_copy_marker(name, fact.ext), not names_type(name, fact.ext), fact.path.count("/"), fact.path)
+
+
 def ordered(facts: list[Facts]) -> list[Facts]:
-    """Conforming files first, then the others, each part by path in code-point order."""
-    return sorted(facts, key=lambda fact: (not fact.conforming, fact.path))
+    return sorted(facts, key=order_key)
 
 
 def plan(facts: list[Facts], taken: list[str]) -> list[Step]:

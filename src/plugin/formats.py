@@ -1,6 +1,6 @@
 """Readers for the file structures the rules look inside, written by hand with bounds checks: a zip's
-central directory and entries, TIFF/EXIF, JPEG segments, PNG and RIFF chunks, ISO media boxes, PDF
-CreationDate literals and Markdown front matter.
+central directory and entries, TIFF/EXIF, JPEG segments, PNG and RIFF chunks, ISO media boxes (HEIF
+items, Canon CR3 metadata), a PDF's document information and Markdown front matter.
 
 Shared, byte for byte, by src/plugin/ and verifier/. Nothing here raises on a malformed file: a
 structure that does not read gives None (or nothing), and the rules then fall back.
@@ -18,9 +18,12 @@ MAX_ENTRIES = 65535
 MAX_IFD_ENTRIES = 1024
 TIFF_HEADERS = (b"II*\x00", b"MM\x00*")
 EXIF_HEADER = b"Exif\x00\x00"
-EXIF_SEARCH = 4 << 20
+EOCD_SEARCH = 22 + 65535
+CANON_UUID = bytes.fromhex("85c0b687820f11e08111f4ce462b6a48")
 PDF_CREATION = re.compile(rb"/CreationDate\s*\(")
-FRONT_DATE = re.compile(r"date:[ \t]*(.*?)[ \t]*$")
+PDF_INFO = re.compile(rb"/Info\s+([0-9]+)\s+([0-9]+)\s+R")
+PDF_LITERAL = 64
+FRONT_LINES = 1000
 
 
 def number(data: bytes, start: int, width: int, big: bool) -> int | None:
@@ -43,10 +46,23 @@ class ZipEntry:
     offset: int
 
 
+def end_record(data: bytes) -> int | None:
+    """Where the zip's end-of-central-directory record starts: the last `PK\\5\\6` in the final 65,557
+    bytes whose comment length reaches exactly the end of the file; None when there is none."""
+    start = max(0, len(data) - EOCD_SEARCH)
+    end = data.rfind(b"PK\x05\x06", start)
+    while end >= 0:
+        comment = number(data, end + 20, 2, False)
+        if comment is not None and end + 22 + comment == len(data):
+            return end
+        end = data.rfind(b"PK\x05\x06", start, end + 3)
+    return None
+
+
 def zip_entries(data: bytes) -> list[ZipEntry]:
     """The entries of a zip's central directory, in order; [] when there is no readable one (or ZIP64)."""
-    end = data.rfind(b"PK\x05\x06", max(0, len(data) - 22 - 65535))
-    if end < 0:
+    end = end_record(data)
+    if end is None:
         return []
     count = number(data, end + 10, 2, False)
     offset = number(data, end + 16, 4, False)
@@ -107,28 +123,43 @@ def ifd_entries(tiff: bytes, ifd: int, big: bool) -> list[tuple[int, int, int, i
     return found
 
 
-def tiff_date_original(tiff: bytes) -> str | None:
-    """A TIFF structure's DateTimeOriginal (Exif IFD 8769, tag 9003, ASCII) as stored, or None."""
-    if tiff[:4] not in TIFF_HEADERS:
-        return None
-    big = tiff[:2] == b"MM"
-    first = number(tiff, 4, 4, big)
-    if first is None:
-        return None
-    exif = None
-    for tag, _kind, _items, at in ifd_entries(tiff, first, big):
-        if tag == 0x8769:
-            exif = number(tiff, at, 4, big)
-            break
-    if exif is None:
-        return None
-    for tag, kind, items, at in ifd_entries(tiff, exif, big):
+def ifd_date(tiff: bytes, ifd: int, big: bool) -> str | None:
+    """The DateTimeOriginal (tag 9003, ASCII, at most 64 bytes) in the IFD at `ifd`, as stored, or None."""
+    for tag, kind, items, at in ifd_entries(tiff, ifd, big):
         if tag == 0x9003 and kind == 2:
             start = at if items <= 4 else number(tiff, at, 4, big)
             if start is None or items > 64 or start + items > len(tiff):
                 return None
             return tiff[start : start + items].split(b"\x00", 1)[0].decode("latin-1")
     return None
+
+
+def first_ifd(tiff: bytes) -> tuple[int, bool] | None:
+    """A TIFF structure's first IFD offset and byte order (True for big-endian), or None."""
+    if tiff[:4] not in TIFF_HEADERS:
+        return None
+    big = tiff[:2] == b"MM"
+    first = number(tiff, 4, 4, big)
+    return None if first is None else (first, big)
+
+
+def tiff_date_original(tiff: bytes) -> str | None:
+    """A TIFF structure's DateTimeOriginal: IFD0 -> its Exif IFD (tag 8769) -> tag 9003, or None."""
+    found = first_ifd(tiff)
+    if found is None:
+        return None
+    first, big = found
+    for tag, _kind, _items, at in ifd_entries(tiff, first, big):
+        if tag == 0x8769:
+            exif = number(tiff, at, 4, big)
+            return None if exif is None else ifd_date(tiff, exif, big)
+    return None
+
+
+def first_ifd_date(tiff: bytes) -> str | None:
+    """Tag 9003 in a TIFF structure's first IFD (a CR3 CMT2 box is the Exif IFD itself), or None."""
+    found = first_ifd(tiff)
+    return None if found is None else ifd_date(tiff, found[0], found[1])
 
 
 def jpeg_exif(data: bytes) -> bytes | None:
@@ -147,23 +178,12 @@ def jpeg_exif(data: bytes) -> bytes | None:
         if marker in (0xDA, 0xD9):
             return None
         length = number(data, at + 2, 2, True)
-        if length is None or length < 2:
+        if length is None or length < 2 or at + 2 + length > len(data):
             return None
         segment = data[at + 4 : at + 2 + length]
         if marker == 0xE1 and segment.startswith(EXIF_HEADER):
             return segment[len(EXIF_HEADER) :]
         at += 2 + length
-    return None
-
-
-def searched_exif(data: bytes) -> bytes | None:
-    """The TIFF after the first `Exif\\0\\0` that is followed by a TIFF header, within the first 4 MiB."""
-    at = data.find(EXIF_HEADER, 0, EXIF_SEARCH)
-    while 0 <= at < EXIF_SEARCH:
-        start = at + len(EXIF_HEADER)
-        if data[start : start + 4] in TIFF_HEADERS:
-            return data[start:]
-        at = data.find(EXIF_HEADER, at + 1, EXIF_SEARCH)
     return None
 
 
@@ -314,6 +334,23 @@ def heif_exif(data: bytes) -> bytes | None:
     return None
 
 
+def cr3_dates_original(data: bytes) -> list[str]:
+    """A CR3's DateTimeOriginal values, in the order the rules try them: the first top-level `moov` ->
+    its Canon `uuid` box -> `CMT2` (the Exif IFD as a TIFF) tag 9003, then `CMT1` (IFD0 as a TIFF) ->
+    Exif IFD -> tag 9003."""
+    for kind, start, end in boxes(data, 0, len(data)):
+        if kind != b"moov":
+            continue
+        for inner, body, body_end in boxes(data, start, end):
+            if inner != b"uuid" or data[body : body + 16] != CANON_UUID:
+                continue
+            found = {name: data[part:part_end] for name, part, part_end in reversed(boxes(data, body + 16, body_end))}
+            values = [first_ifd_date(found[b"CMT2"]) if b"CMT2" in found else None, tiff_date_original(found[b"CMT1"]) if b"CMT1" in found else None]
+            return [value for value in values if value is not None]
+        return []
+    return []
+
+
 def mvhd_seconds(data: bytes) -> int | None:
     """The `moov`/`mvhd` creation time, seconds since 1904-01-01 UTC; None when absent or 0."""
     for kind, start, end in boxes(data, 0, len(data)):
@@ -334,26 +371,46 @@ def mvhd_seconds(data: bytes) -> int | None:
 # ----- PDF and Markdown -----
 
 
-def pdf_creation(data: bytes) -> str | None:
-    """The text of the last `/CreationDate (` literal (at most 64 bytes, up to its `)`), or None."""
+def literal(data: bytes, found: re.Match) -> str:
+    """A PDF literal's text after `(`: up to the next `)`, at most 64 bytes."""
+    return data[found.end() : found.end() + PDF_LITERAL].split(b")", 1)[0].decode("latin-1")
+
+
+def last_match(pattern: re.Pattern, data: bytes) -> re.Match | None:
     last = None
-    for found in PDF_CREATION.finditer(data):
+    for found in pattern.finditer(data):
         last = found
-    if last is None:
-        return None
-    value = data[last.end() : last.end() + 64]
-    return value.split(b")", 1)[0].decode("latin-1")
+    return last
+
+
+def pdf_creation(data: bytes) -> str | None:
+    """The CreationDate of a PDF's document information dictionary: the object the last `/Info N G R`
+    names, when it is written out plainly (the last `N G obj` ... `endobj`), decides; without an `/Info`
+    reference, or when that object is not written out plainly, the last `/CreationDate (` literal in
+    the file. None when the deciding place holds no CreationDate literal."""
+    info = last_match(PDF_INFO, data)
+    if info is not None:
+        header = re.compile(rb"(?<![0-9])" + info.group(1) + rb"\s+" + info.group(2) + rb"\s+obj\b")
+        body = last_match(header, data)
+        if body is not None:
+            close = data.find(b"endobj", body.end())
+            if close >= 0:
+                found = PDF_CREATION.search(data, body.end(), close)
+                return literal(data, found) if found else None
+    last = last_match(PDF_CREATION, data)
+    return literal(data, last) if last else None
 
 
 def front_matter_date(text: str) -> str | None:
-    """The value of the first `date:` line inside a leading `---` front matter, or None."""
-    lines = [line.rstrip("\r") for line in text.split("\n")]
-    if not lines or lines[0] != "---":
+    """The value of the first `date:` line in a leading `---` front matter, read from the first 1,000
+    lines; trimmed of spaces and tabs, then of quotes. None when there is none."""
+    lines = text.split("\n", FRONT_LINES)[:FRONT_LINES]
+    if lines[0].removesuffix("\r") != "---":
         return None
     for line in lines[1:]:
-        if line.strip() == "---":
+        line = line.removesuffix("\r")
+        if line.strip(" \t") == "---":
             return None
-        found = FRONT_DATE.match(line)
-        if found:
-            return found.group(1)
+        if line.startswith("date:"):
+            return line[5:].strip(" \t").strip("'\"")
     return None

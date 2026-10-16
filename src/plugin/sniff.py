@@ -4,11 +4,12 @@ extension). Shared, byte for byte, by src/plugin/ and verifier/.
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from dataclasses import dataclass
 
-from .formats import zip_entries, zip_read
+from .formats import number, zip_entries, zip_member, zip_read
 
 RAW_EXTS = frozenset(["dng", "nef", "cr2", "arw", "orf", "rw2", "pef", "srw", "nrw", "3fr", "erf", "kdc", "mos", "mef", "iiq"])
 TEXT_GROUPS = {
@@ -21,23 +22,82 @@ TEXT_GROUPS = {
         "code",
     ),
 }
-TEXT_ALIASES = {"markdown": "md", "yml": "yaml", "htm": "html", "ndjson": "jsonl"}
+NORMALIZED = {"markdown": "md", "yml": "yaml", "htm": "html", "ndjson": "jsonl", "jpeg": "jpg", "jpe": "jpg", "jfif": "jpg", "tif": "tiff"}
+# Office main parts and the extension each content type of theirs gives (RULES §2, zips).
+WORD_TYPES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml": "docx",
+    "application/vnd.ms-word.document.macroenabled.main+xml": "docm",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml": "dotx",
+    "application/vnd.ms-word.template.macroenabledtemplate.main+xml": "dotm",
+}
+EXCEL_TYPES = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml": "xlsx",
+    "application/vnd.ms-excel.sheet.macroenabled.main+xml": "xlsm",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml": "xltx",
+    "application/vnd.ms-excel.template.macroenabled.main+xml": "xltm",
+    "application/vnd.ms-excel.addin.macroenabled.main+xml": "xlam",
+    "application/vnd.ms-excel.sheet.binary.macroenabled.main": "xlsb",
+}
+POWERPOINT_TYPES = {
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml": "pptx",
+    "application/vnd.ms-powerpoint.presentation.macroenabled.main+xml": "pptm",
+    "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml": "potx",
+    "application/vnd.ms-powerpoint.template.macroenabled.main+xml": "potm",
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml": "ppsx",
+    "application/vnd.ms-powerpoint.slideshow.macroenabled.main+xml": "ppsm",
+    "application/vnd.ms-powerpoint.addin.macroenabled.main+xml": "ppam",
+}
+OFFICE = (
+    (("word/document.xml",), "documents", "docx", WORD_TYPES),
+    (("xl/workbook.xml", "xl/workbook.bin"), "spreadsheets", "xlsx", EXCEL_TYPES),
+    (("ppt/presentation.xml",), "presentations", "pptx", POWERPOINT_TYPES),
+)
+OFFICE_EXTS = frozenset(ext for _parts, _group, _plain, types in OFFICE for ext in types.values())
 # Extensions the binary table gives, and the aliases it never keeps: a file that does not match their
 # content never keeps one as other/<ext>.
 TABLE_EXTS = frozenset(
-    ["pdf", "png", "jpg", "gif", "webp", "wav", "avi", "heic", "avif", "mov", "m4a", "cr3", "mp4", "tiff", "raf", "mp3", "flac", "ogg", "webm", "mkv", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "zip", "gz", "tar", "7z", "rar", "jpeg", "jpe", "jfif", "tif"]
+    ["pdf", "png", "jpg", "gif", "webp", "wav", "avi", "heic", "avif", "mov", "m4a", "cr3", "mp4", "tiff", "raf", "mp3", "flac", "ogg", "webm", "mkv", "zip", "gz", "tar", "7z", "rar", "ts", "epub", "odt", "ods", "odp", "jpeg", "jpe", "jfif", "tif", *OFFICE_EXTS]
 )
 HEIC_BRANDS = frozenset({b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1"})
 AVIF_BRANDS = frozenset({b"avif", b"avis"})
+QUICKTIME_ATOMS = frozenset({b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot"})
 ODF_TYPES = {
     b"application/vnd.oasis.opendocument.text": ("documents", "odt"),
     b"application/vnd.oasis.opendocument.spreadsheet": ("spreadsheets", "ods"),
     b"application/vnd.oasis.opendocument.presentation": ("presentations", "odp"),
     b"application/epub+zip": ("documents", "epub"),
 }
-OOXML_PARTS = (("word/document.xml", "documents", "docx"), ("xl/workbook.xml", "spreadsheets", "xlsx"), ("ppt/presentation.xml", "presentations", "pptx"))
+CONTENT_TAG = re.compile(r"<(Override|Default)\b([^<>]*+)>")
+CONTENT_ATTRIBUTE = re.compile(r"""\b(PartName|Extension|ContentType)\s*=\s*("[^"]*"|'[^']*')""")
 LOG_FIRST = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}")
 BOM = b"\xef\xbb\xbf"
+# Only codecs Python decodes without importing a codec module, which a verifier may not do: "utf-16"
+# and "utf-32" read the byte-order mark (and drop it); Windows-1252 is Latin-1 with bytes 80-9F mapped.
+WIDE_BOMS = ((b"\xff\xfe\x00\x00", "utf-32"), (b"\x00\x00\xfe\xff", "utf-32"), (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16"))
+CP1252_HIGH = (
+    "\u20ac\x81\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\x8d\u017d\x8f"
+    "\x90\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\x9d\u017e\u0178"
+)
+CP1252 = {0x80 + index: char for index, char in enumerate(CP1252_HIGH)}
+CP1252_UNDEFINED = re.compile(rb"[\x81\x8d\x8f\x90\x9d]")
+LEGACY_CONTROL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f]")
+# A JSON string, or an unterminated one running to the end: possessive, so stripping strings is linear.
+JSON_STRING = re.compile(r'"(?:[^"\\]|\\(?:.|\Z))*+(?:"|\Z)', re.DOTALL)
+NOT_BRACKET = re.compile(r"[^\[\]{}]+")
+BRACKET_STEP = {"[": 1, "{": 1, "]": -1, "}": -1}
+JSON_DEPTH = 512
+# MPEG audio: kbit/s for bitrate indexes 1-14, by (MPEG-1?, layer); sample rates by version bits.
+BITRATES = {
+    (True, 1): (32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
+    (True, 2): (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+    (True, 3): (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+    (False, 1): (32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+    (False, 2): (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+    (False, 3): (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+}
+SAMPLE_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+TS_PACKET = 188
+TS_PACKETS = 20
 
 
 @dataclass(frozen=True)
@@ -51,19 +111,175 @@ class Kind:
         return f"{self.group}/{self.type}"
 
 
+def normalized(claimed: str) -> str:
+    return NORMALIZED.get(claimed, claimed)
+
+
+def kept_ext(claimed: str) -> bool:
+    """Whether a claimed extension is kept as other/<ext>: neither a text extension nor one the table gives."""
+    return bool(claimed) and normalized(claimed) not in TEXT_GROUPS and claimed not in TABLE_EXTS
+
+
+# ----- Text (rows 10, 19 and 20) -----
+
+
+def wide_text(data: bytes) -> str | None:
+    """Row 10: text after a UTF-32 or UTF-16 byte-order mark, or None."""
+    for bom, codec in WIDE_BOMS:
+        if data.startswith(bom):
+            try:
+                text = data.decode(codec)
+            except UnicodeDecodeError:
+                return None
+            return None if "\x00" in text else text
+    return None
+
+
 def decoded(data: bytes) -> str | None:
-    """`data` as UTF-8 text without its BOM, or None when it does not decode or holds a NUL byte."""
+    """Row 19: `data` as UTF-8 text without its BOM, or None when it does not decode or holds a NUL."""
     try:
-        text = (data.removeprefix(BOM)).decode("utf-8")
+        text = data.removeprefix(BOM).decode("utf-8")
     except UnicodeDecodeError:
         return None
     return None if "\x00" in text else text
 
 
-def mpeg_frame(data: bytes) -> bool:
-    if len(data) < 3 or data[0] != 0xFF or data[1] & 0xE0 != 0xE0:
+def legacy_text(data: bytes, claimed: str) -> str | None:
+    """Row 20: Windows-1252 text in a file that claims a text extension, or None."""
+    if normalized(claimed) not in TEXT_GROUPS or b"\x00" in data or CP1252_UNDEFINED.search(data):
+        return None
+    text = data.decode("latin-1").translate(CP1252)
+    return None if LEGACY_CONTROL.search(text) else text
+
+
+def as_text(data: bytes, claimed: str) -> str | None:
+    """The text a text row reads from `data` (rows 10, 19 and 20, in that order), or None."""
+    text = wide_text(data)
+    if text is None:
+        text = decoded(data)
+    if text is None:
+        text = legacy_text(data, claimed)
+    return text
+
+
+def json_depth(text: str) -> int:
+    """How deep arrays and objects nest outside strings."""
+    brackets = NOT_BRACKET.sub("", JSON_STRING.sub("", text))
+    return max(itertools.accumulate(map(BRACKET_STEP.get, brackets)), default=0)
+
+
+def not_a_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")
+
+
+def is_json(text: str) -> bool:
+    """RFC 8259 JSON nested at most 512 deep (NaN and Infinity are not JSON)."""
+    if json_depth(text) > JSON_DEPTH:
         return False
-    return (data[1] >> 3) & 3 != 1 and (data[1] >> 1) & 3 != 0 and data[2] >> 4 != 15 and (data[2] >> 2) & 3 != 3
+    try:
+        json.loads(text, parse_constant=not_a_constant, parse_int=str, parse_float=str)
+    except (ValueError, RecursionError):
+        return False
+    return True
+
+
+def is_csv(text: str) -> bool:
+    """At least 3 non-blank lines, all with the same number of commas, at least one."""
+    count = None
+    lines = 0
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        commas = line.count(",")
+        if count is not None and commas != count:
+            return False
+        count = commas
+        lines += 1
+    return lines >= 3 and count is not None and count >= 1
+
+
+def svg_after_declaration(head: str) -> bool:
+    """Whether `<svg` follows the first `?>` (within the first 4,096 characters) after optional whitespace."""
+    end = head.find("?>", 0, 4096)
+    return end >= 0 and end + 2 <= 4096 and head[end + 2 :].lstrip().startswith("<svg")
+
+
+def text_kind(text: str, claimed: str) -> Kind:
+    ext = normalized(claimed)
+    if ext in TEXT_GROUPS:
+        return Kind(TEXT_GROUPS[ext], ext, ext)
+    if kept_ext(claimed):
+        return Kind("other", claimed, claimed)
+    head = text.lstrip()
+    first = text.split("\n", 1)[0].removesuffix("\r")
+    lower = head[:64].lower()
+    if head.startswith("<svg") or (head.startswith("<?xml") and svg_after_declaration(head)):
+        return Kind("images", "svg", "svg")
+    if lower.startswith(("<!doctype html", "<html")):
+        return Kind("documents", "html", "html")
+    if head.startswith("{\\rtf"):
+        return Kind("documents", "rtf", "rtf")
+    if head.startswith(("{", "[")) and is_json(text):
+        return Kind("data", "json", "json")
+    if first.startswith("# ") or first == "---":
+        return Kind("documents", "md", "md")
+    if is_csv(text):
+        return Kind("spreadsheets", "csv", "csv")
+    if LOG_FIRST.match(first):
+        return Kind("data", "log", "log")
+    return Kind("documents", "txt", "txt")
+
+
+# ----- Binary rows -----
+
+
+def mpeg_header(data: bytes, at: int) -> tuple[int, int, int] | None:
+    """(version bits, layer, frame length) of a valid MPEG audio frame header at `at`, or None."""
+    if at + 4 > len(data) or data[at] != 0xFF or data[at + 1] & 0xE0 != 0xE0:
+        return None
+    version, layer_bits = (data[at + 1] >> 3) & 3, (data[at + 1] >> 1) & 3
+    bitrate_index, rate_index, padding = data[at + 2] >> 4, (data[at + 2] >> 2) & 3, (data[at + 2] >> 1) & 1
+    if version == 1 or layer_bits == 0 or bitrate_index in (0, 15) or rate_index == 3:
+        return None
+    layer = 4 - layer_bits
+    bitrate = BITRATES[version == 3, layer][bitrate_index - 1] * 1000
+    rate = SAMPLE_RATES[version][rate_index]
+    if layer == 1:
+        length = (12 * bitrate // rate + padding) * 4
+    elif layer == 2 or version == 3:
+        length = 144 * bitrate // rate + padding
+    else:
+        length = 72 * bitrate // rate + padding
+    return version, layer, length
+
+
+def mpeg_audio(data: bytes) -> bool:
+    """A frame header at 0, and, when the file holds that frame and 4 bytes more, a second like it right after."""
+    first = mpeg_header(data, 0)
+    if first is None:
+        return False
+    version, layer, length = first
+    if len(data) < length + 4:
+        return True
+    second = mpeg_header(data, length)
+    return second is not None and second[:2] == (version, layer)
+
+
+def quicktime(data: bytes) -> bool:
+    """Row 7: a classic QuickTime top-level atom at 0 whose size fits the file."""
+    if len(data) < 8 or data[4:8] not in QUICKTIME_ATOMS:
+        return False
+    size = number(data, 0, 4, True)
+    if size == 1:
+        large = number(data, 8, 8, True)
+        return large is not None and 16 <= large <= len(data)
+    return size == 0 or 8 <= size <= len(data)
+
+
+def transport_stream(data: bytes) -> bool:
+    """Row 21: at least 3 packets of 188 bytes, each of the first 20 the file holds starting 0x47."""
+    packets = min(TS_PACKETS, len(data) // TS_PACKET)
+    return packets >= 3 and all(data[TS_PACKET * index] == 0x47 for index in range(packets))
 
 
 def iso_kind(data: bytes) -> Kind:
@@ -85,18 +301,47 @@ def iso_kind(data: bytes) -> Kind:
 
 
 def other(claimed: str) -> Kind:
-    """Rule: a claimed extension that is neither a text extension nor one the table gives is kept as other/<ext>."""
-    if claimed and claimed not in TEXT_GROUPS and claimed not in TEXT_ALIASES and claimed not in TABLE_EXTS:
+    """Row 22: a claimed extension that is neither a text extension nor one the table gives is kept as other/<ext>."""
+    if kept_ext(claimed):
         return Kind("other", claimed, claimed)
     return Kind("other", "bin", "bin")
 
 
+def content_type(data: bytes, part: str) -> str | None:
+    """The content type `[Content_Types].xml` gives an Office main part: its Override, else the Default
+    for its extension (part names and extensions compared ignoring case)."""
+    content = zip_member(data, "[Content_Types].xml")
+    if content is None:
+        return None
+    override = default = None
+    extension = part.rpartition(".")[2].lower()
+    for tag in CONTENT_TAG.finditer(content.decode("utf-8", "replace")):
+        attributes = {name: value[1:-1] for name, value in CONTENT_ATTRIBUTE.findall(tag.group(2))}
+        if tag.group(1) == "Override" and override is None and attributes.get("PartName", "").lower() == "/" + part.lower():
+            override = attributes.get("ContentType")
+        elif tag.group(1) == "Default" and default is None and attributes.get("Extension", "").lower() == extension:
+            default = attributes.get("ContentType")
+    return override if override is not None else default
+
+
+def office_kind(data: bytes, names: set[str], claimed: str) -> Kind | None:
+    for parts, group, plain, types in OFFICE:
+        part = next((part for part in parts if part in names), None)
+        if part is None:
+            continue
+        found = content_type(data, part)
+        ext = types.get(found.lower()) if found is not None else None
+        if ext is None:
+            ext = claimed if claimed in types.values() else plain
+        return Kind(group, ext, ext)
+    return None
+
+
 def zip_kind(data: bytes, claimed: str) -> Kind:
     entries = zip_entries(data)
-    names = {entry.name for entry in entries}
-    for part, group, kind in OOXML_PARTS:
-        if part in names:
-            return Kind(group, kind, kind)
+    office = office_kind(data, {entry.name for entry in entries}, claimed)
+    if office is not None:
+        return office
     for entry in entries:
         if entry.name == "mimetype":
             content = zip_read(data, entry)
@@ -104,53 +349,9 @@ def zip_kind(data: bytes, claimed: str) -> Kind:
                 group, kind = ODF_TYPES[content]
                 return Kind(group, kind, kind)
             break
-    if claimed and claimed not in TEXT_GROUPS and claimed not in TEXT_ALIASES and claimed not in TABLE_EXTS:
+    if kept_ext(claimed):
         return Kind("other", claimed, claimed)
     return Kind("archives", "zip", "zip")
-
-
-def is_json(text: str) -> bool:
-    try:
-        json.loads(text)
-    except (ValueError, RecursionError):
-        return False
-    return True
-
-
-def is_csv(text: str) -> bool:
-    lines = [line for line in (line.rstrip("\r") for line in text.split("\n")) if line.strip()]
-    counts = {line.count(",") for line in lines}
-    return len(lines) >= 3 and len(counts) == 1 and min(counts) >= 1
-
-
-def svg_after_declaration(head: str) -> bool:
-    """Whether `<svg` follows the first `?>` (within the first 4,096 characters) after optional whitespace."""
-    end = head.find("?>", 0, 4096)
-    return end >= 0 and end + 2 <= 4096 and head[end + 2 :].lstrip().startswith("<svg")
-
-
-def text_kind(text: str, claimed: str) -> Kind:
-    ext = TEXT_ALIASES.get(claimed, claimed)
-    if ext in TEXT_GROUPS:
-        return Kind(TEXT_GROUPS[ext], ext, ext)
-    head = text.lstrip()
-    first = text.split("\n", 1)[0].rstrip("\r")
-    lower = head[:64].lower()
-    if head.startswith("<svg") or (head.startswith("<?xml") and svg_after_declaration(head)):
-        return Kind("images", "svg", "svg")
-    if lower.startswith(("<!doctype html", "<html")):
-        return Kind("documents", "html", "html")
-    if head.startswith("{\\rtf"):
-        return Kind("documents", "rtf", "rtf")
-    if head.startswith(("{", "[")) and is_json(text):
-        return Kind("data", "json", "json")
-    if first.startswith("# ") or first == "---":
-        return Kind("documents", "md", "md")
-    if is_csv(text):
-        return Kind("spreadsheets", "csv", "csv")
-    if LOG_FIRST.match(first):
-        return Kind("data", "log", "log")
-    return Kind("documents", "txt", "txt")
 
 
 def sniff(data: bytes, name: str, claimed: str) -> Kind:
@@ -173,11 +374,16 @@ def sniff(data: bytes, name: str, claimed: str) -> Kind:
             return Kind("video", "avi", "avi")
     if len(data) >= 12 and data[4:8] == b"ftyp":
         return iso_kind(data)
+    if quicktime(data):
+        return Kind("video", "mov", "mov")
     if data.startswith((b"II*\x00", b"MM\x00*")):
         return Kind("images", "raw", claimed) if claimed in RAW_EXTS else Kind("images", "tiff", "tiff")
     if data.startswith(b"FUJIFILMCCD-RAW"):
         return Kind("images", "raw", "raf")
-    if (data.startswith(b"ID3") and len(data) > 3 and data[3] in (2, 3, 4)) or mpeg_frame(data):
+    text = wide_text(data)
+    if text is not None:
+        return text_kind(text, claimed)
+    if (data.startswith(b"ID3") and len(data) > 3 and data[3] in (2, 3, 4)) or mpeg_audio(data):
         return Kind("audio", "mp3", "mp3")
     if data.startswith(b"fLaC"):
         return Kind("audio", "flac", "flac")
@@ -197,6 +403,10 @@ def sniff(data: bytes, name: str, claimed: str) -> Kind:
     if data.startswith(b"Rar!\x1a\x07"):
         return Kind("archives", "rar", "rar")
     text = decoded(data)
+    if text is None:
+        text = legacy_text(data, claimed)
     if text is not None:
         return text_kind(text, claimed)
+    if transport_stream(data):
+        return Kind("video", "ts", "ts")
     return other(claimed)

@@ -5,15 +5,16 @@ A `nanoagent.plugin/v1` plugin for NanoAgent 0.5, with the structure of the refe
 of the member's own files: an agent deletes exact duplicates, junk and empty files and files every
 other file under `organized/<group>/<type>/<YYYY>/<YYYY-MM-DD>_<slug>.<ext>` by the rules in
 [src/plugin/RULES.md](src/plugin/RULES.md). A static, rule-based verifier (no model anywhere) compares
-the folder after the run with an answer key pinned before it, hash by hash and path by path, and
-re-reads every file in place to check that it follows the rules for its own bytes.
+the folder after the run with an answer key pinned before it, hash by hash and path by path, re-reads
+every file in place to check that it follows the rules for its own bytes, and checks that everything
+the rules leave alone (hidden entries, everything outside the folder) is exactly as it was.
 
 ## Tools
 
 | Tool | Does | Code |
 |---|---|---|
-| `pin_layout` | Reads every file in a copy of the agent folder taken before the agent starts, applies the rules and pins each file's facts (sha256, sniffed type, embedded or named date, slug, base path) and the step the rules give it; the task's answer key, which the agent never sees | `src/plugin/organizer.py` |
-| `survey` | Lists this run's files to act on: the first 60 actions in the rules' order, each with its number `i`, the start of its sha256 (`h`), where the rules file it (`base`) and whether to drop it (`junk`, `empty`, or `copy` of a file already in place). The first call of a run fixes the rows; later calls repeat them with the run's summary so far | `src/plugin/organizer.py` |
+| `pin_layout` | Reads every file in a copy of the agent folder taken before the agent starts, applies the rules and pins each file's facts (sha256, sniffed type, embedded or named date, slug, base path) and the step the rules give it, plus a snapshot (path, size, sha256) of everything the run must leave as it was; the task's answer key, which the agent never sees | `src/plugin/organizer.py` |
+| `survey` | Lists this run's files to act on: the first 60 actions in the rules' order, each with its number `i`, the start of its sha256 (`h`), where the rules file it (`base`) and whether to drop it (`junk`, `empty`, or `copy` of a file already in place). The first call of a run fixes the rows and removes the folder's empty folders; later calls repeat the rows with the run's summary so far | `src/plugin/organizer.py` |
 | `apply` | Deletes rows by `i` and moves rows `{i, n}` to the n-th free name of their base (`base`, `base_2`, …), in this run's rows only, after checking each file's bytes; a refused item is reported and the others are done; it never deletes the last copy of any content and removes folders left empty | `src/plugin/organizer.py` |
 
 ### Tasks
@@ -52,18 +53,21 @@ not checked). The verdict is valid only when all hold, and only then is the scor
 | 1 | `answer-key` | The pinned answer key is for this folder and is exactly the rules applied to its pinned facts |
 | 2 | `submitted-folder` | The submitted result names the folder the task asked for |
 | 3 | `folder-present` | The folder is still in the agent folder |
-| 4 | `every-file-kept` | Every content the folder must keep still exists somewhere in it |
-| 5 | `moved-to-rules-path` | Every file this run moves holds its bytes at exactly the path the rules give it |
-| 6 | `duplicates-and-junk-removed` | Every duplicate, junk and empty file this run deletes is gone |
-| 7 | `others-untouched` | Every file this run does not act on is where it was, byte for byte |
-| 8 | `nothing-extra` | The folder holds no other file (no copies left behind, no strays, no symlinks) |
-| 9 | `organized-by-rules` | Every file in place follows the rules when re-read from its own bytes |
-| 10 | `summary-matches` | The submitted summary's counts match the folder (moved = new paths, deleted, left, stayed, remaining) |
-| 11 | `saved-back` | The agent folder holds fewer than 5,000 entries, so RUSH Lab saves the result |
+| 4 | `plain-entries` | The agent folder holds only files and folders the rules can read: no symlink, special file or unreadable entry (otherwise the verdict says the rules refuse the folder, and checks nothing else) |
+| 5 | `every-file-kept` | Every content the folder must keep still exists somewhere in it |
+| 6 | `moved-to-rules-path` | Every file this run moves holds its bytes at exactly the path the rules give it |
+| 7 | `duplicates-and-junk-removed` | Every duplicate, junk and empty file this run deletes is gone |
+| 8 | `others-untouched` | Every file this run does not act on is where it was, byte for byte |
+| 9 | `hidden-untouched` | Every hidden file and folder in the folder is as the snapshot pinned it, and none is new |
+| 10 | `outside-untouched` | Everything in the agent folder outside the folder is as pinned, and nothing is new there (the run state aside) |
+| 11 | `nothing-extra` | The folder holds no other file (no copies left behind, no strays) and no empty folder |
+| 12 | `organized-by-rules` | Every file in place follows the rules when re-read from its own bytes |
+| 13 | `summary-matches` | The submitted summary's counts match the folder (moved = new paths, deleted, left, stayed, remaining) |
+| 14 | `saved-back` | The agent folder holds fewer than 5,000 entries, so RUSH Lab saves the result |
 
 Score = hits / (hits + misses): hits are this run's moves at their path and deletes done; misses are
-every path that differs in checks 5-9, counted once, plus one per failed check 2, 10 or 11. A failed
-check 1 or 3 scores 0.
+every path that differs in checks 6-12, counted once, plus one per failed check 2, 13 or 14. A failed
+check 1, 3 or 4 scores 0.
 
 ## The rules
 
@@ -71,16 +75,21 @@ check 1 or 3 scores 0.
 independent oracle in `tests/oracle/` is written from. In short:
 
 - Junk (`.DS_Store`, `Thumbs.db`, `._*`, `~$*`, `.tmp`, `.part`, `.crdownload`, …) and empty files are
-  deleted; hidden files and folders (`.git/`, …) are left alone.
-- The **content** decides the type, never the name: about 35 real formats (PDF, PNG, JPEG, GIF, WebP,
-  HEIC, AVIF, TIFF and camera raw, MP3, FLAC, OGG, WAV, MP4, MOV, M4A, WebM, MKV, AVI, docx, xlsx,
-  pptx, odt, ods, odp, epub, zip, gz, tar, 7z, rar, and text by its extension or content).
-- The **date** is the one embedded in the file (EXIF, PNG text, PDF, Office and OpenDocument
-  properties, the MP4 movie header, Markdown front matter), else a date in the name, else `undated`.
-  Modification times are never used: uploading a file changes them.
-- Exact duplicates (same sha256) keep their earliest copy in the rules' order; a name already taken
-  gets `_2`, `_3`, …; a name already in scheme form keeps its slug, so organizing an organized folder
-  changes nothing.
+  deleted; hidden files and folders (`.git/`, …) and everything outside the folder are left exactly as
+  they were; empty folders are removed.
+- The **content** decides the type, never the name: about 40 real formats (PDF, PNG, JPEG, GIF, WebP,
+  HEIC, AVIF, TIFF and camera raw, MP3, FLAC, OGG, WAV, MP4, MOV (also classic QuickTime), M4A, WebM,
+  MKV, AVI, MPEG-TS, the Office family (docx, docm, dotx, xlsx, xlsm, xltx, xlsb, pptx, pptm, ppsx, …),
+  odt, ods, odp, epub, zip, gz, tar, 7z, rar, and text in UTF-8, UTF-16, UTF-32 or Windows-1252, by
+  its extension or its content).
+- The **date** is the one embedded in the file (EXIF, CR3 metadata, PNG text, the PDF's document
+  information, Office and OpenDocument properties, the MP4/MOV movie header, Markdown front matter),
+  else a date in the name, else `undated`. Modification times are never used: uploading a file
+  changes them.
+- Exact duplicates (same sha256) keep one copy: the first in the rules' order, which puts files in
+  place first, then names without a copy marker (`(1)`, ` copy`, `Copy of `), then names whose
+  extension is their type's, then the shallowest path. A name already taken gets `_2`, `_3`, …; a name
+  already in scheme form keeps its slug, so organizing an organized folder changes nothing.
 
 ## Layout
 
@@ -93,7 +102,7 @@ src/plugin/
   naming.py sniff.py meta.py formats.py inflate.py walk.py plan.py layout.py
                        the rules in code (shared, byte for byte, with verifier/)
   __main__.py          the MCP server
-verifier/              verify_input, verify_output, verify_task (task.py: the 11 constraints), plus
+verifier/              verify_input, verify_output, verify_task (task.py: the 14 constraints), plus
                        byte-identical copies of the rule modules
 ui/renderers.js        draws OrganizeOutput with the verifier's checks and this run's files
 tests/                 unit, property, oracle-differential, server and replay tests; tests/cases/
@@ -120,18 +129,20 @@ Python):
 
 ```bash
 python scripted_task.py . tests/cases/gold_small.json --sandbox seatbelt   # one case
-python run_cases.py . tests/cases --jobs 4 --sandbox seatbelt              # all 19, with timings
+python run_cases.py . tests/cases --jobs 4 --sandbox seatbelt              # all 38, with timings
 uv run python tests/corpus/real_cases.py /tmp/real-cases 9                 # cases on real-file folders
 python run_cases.py . /tmp/real-cases --sandbox seatbelt
 ```
 
 Each case unpacks an agent folder (`tests/cases/folders/*.tar.gz`), lets the reference pin the answer
 key from a copy of it, then runs `survey`, a python step that decides the rows exactly as the
-instructions say (`tests/cases/agent.py`), `apply` twice and `submit`. The 9 gold cases must be valid at
-1.0; each of the 10 wrong cases makes one mistake (keeping the wrong copy, moving a duplicate, swapping
-collision numbers, skipping a call, moving junk, a false summary, tampering, a stray file, a copy left
-behind, a number outside the run) and must fail the constraint it breaks. `tests/test_cases.py` replays
-them all without NanoAgent. `tests/cases/build_cases.py` rebuilds every case and its folder from the
+instructions say (`tests/cases/agent.py`), `apply` twice and `submit`. The 12 gold cases must be valid
+at 1.0; each of the 26 wrong cases makes one mistake (keeping the wrong copy, moving a duplicate,
+swapping collision numbers, skipping a call, moving junk, a false summary, tampering, a stray file, a
+copy left behind, a number outside the run; and the review's red team: hidden entries changed, removed
+or added, files outside the folder changed or added, empty folders left, a FIFO, an unreadable file, a
+symlink in the folder) and must fail the constraint it breaks. `tests/test_cases.py` replays them all
+without NanoAgent. `tests/cases/build_cases.py` rebuilds every case and its folder from the
 builders, deterministically.
 
 The real-file corpus (`tests/corpus/sources.json`: 38 files, 2.5 MB) comes from the Pillow and
@@ -142,10 +153,13 @@ downloaded at test time, never committed.
 ## Limitations
 
 - One run does at most 60 actions; larger folders take several runs (the verdict says how many remain).
-- A folder is refused when it holds more than 1,000 files, 200 MiB, a file over 10 MiB, a symlink,
-  paths deeper than 12 folders or longer than 300 characters, case or Unicode variants of the folders
-  the rules create, or would leave more than 4,900 entries in the agent folder.
-- Dates come only from the metadata RULES.md lists (no XMP, no compressed PDF object streams, no ID3
-  or QuickTime text dates); camera raw files other than TIFF-based ones, Fuji RAF and Canon CR3
-  without an Exif block are undated unless their name carries a date.
+- A folder is refused when it holds more than 1,000 files, 200 MiB, a file over 10 MiB, paths deeper
+  than 12 folders or longer than 300 characters, case or Unicode variants of the folders the rules
+  create, or would leave more than 4,900 entries in the agent folder; and when the agent folder holds
+  a symlink, a special file or an unreadable entry anywhere, or more than 1 GiB (the verifier reads it
+  all to check that the run left it as it was).
+- Dates come only from the metadata RULES.md lists (no XMP, no PDF information inside compressed
+  object streams, no ID3 or QuickTime text dates); RW2, ORF, RAF and other raw files that are not
+  TIFF-shaped are undated unless their name carries a date. Text in legacy encodings other than
+  Windows-1252 (Shift-JIS, MacRoman, …) is not recognized as text.
 - Embedded dates are taken as stored, with no time-zone conversion.

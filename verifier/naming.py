@@ -26,6 +26,7 @@ NOT_SLUG = re.compile(r"[^a-z0-9]+")
 SLUG_LIMIT = 60
 EMPTY_SLUG = "file"
 NAME_YEARS = (1990, 2039)
+ALIASES = {"jpg": ("jpeg", "jpe", "jfif"), "tiff": ("tif",), "md": ("markdown",), "yaml": ("yml",), "html": ("htm",), "jsonl": ("ndjson",), "tar.gz": ("tgz",)}
 EMBEDDED_YEARS = (1971, 2099)
 
 
@@ -76,9 +77,10 @@ def is_junk(name: str) -> bool:
     return lower in JUNK_NAMES or lower.startswith(JUNK_PREFIXES) or claimed_ext(name) in JUNK_EXTS
 
 
-def is_hidden(name: str) -> bool:
-    """A name the rules leave alone; junk is checked first, so `.DS_Store` is junk, not hidden."""
-    return name.startswith(".") and not is_junk(name)
+def is_hidden(name: str, folder: bool = False) -> bool:
+    """A name the rules leave alone: a folder whose name starts with `.`, or such a file that is not junk
+    (junk is checked first, so the file `.DS_Store` is junk, not hidden)."""
+    return name.startswith(".") and (folder or not is_junk(name))
 
 
 def stem_of(name: str, ext: str) -> str:
@@ -113,11 +115,13 @@ def name_date(stem: str) -> tuple[str, int, int] | None:
     return None
 
 
-def slug_of(stem: str) -> str:
-    """RULES §4: the slug of a name that is not in scheme form, from its stem."""
+def unmarked(stem: str) -> tuple[str, bool]:
+    """RULES §4 slug steps 1-4: the stem without its real date, as lowercase ASCII, with copy markers
+    stripped; and whether steps 3-4 stripped anything (a copy marker)."""
     dated = name_date(stem)
     text = stem[: dated[1]] + stem[dated[2] :] if dated else stem
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
+    before = text
     while COPY_PREFIX.match(text):
         text = COPY_PREFIX.sub("", text, count=1)
     while True:
@@ -125,9 +129,25 @@ def slug_of(stem: str) -> str:
         if stripped == text:
             break
         text = stripped
-    text = NOT_SLUG.sub("-", text).strip("-")
+    return text, text != before
+
+
+def slug_of(stem: str) -> str:
+    """RULES §4: the slug of a name that is not in scheme form, from its stem."""
+    text = NOT_SLUG.sub("-", unmarked(stem)[0]).strip("-")
     text = text[:SLUG_LIMIT].rstrip("-")
     return text or EMPTY_SLUG
+
+
+def has_copy_marker(name: str, ext: str) -> bool:
+    """RULES §4: whether a name (not in scheme form) carries a copy marker the slug strips."""
+    return scheme(name) is None and unmarked(stem_of(name, ext))[1]
+
+
+def names_type(name: str, ext: str) -> bool:
+    """RULES §4: whether a name ends, ignoring case, with `.<ext>` or `.<alias of ext>`."""
+    lower = name.lower()
+    return any(lower.endswith("." + tail) for tail in (ext, *ALIASES.get(ext, ())))
 
 
 def name_facts(name: str, ext: str) -> tuple[str | None, str]:

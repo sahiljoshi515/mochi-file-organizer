@@ -6,10 +6,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from builders import edge_files
 from messy import messy, organized_folder, unpack
+from oracle.oracle import facts as oracle_facts
 from oracle.oracle import organize
 
 from plugin.layout import look
+from plugin.walk import describe
 
 FACT_FIELDS = ("path", "size", "sha256", "junk", "group", "type", "ext", "date", "slug", "base", "conforming")
 STEP_FIELDS = ("i", "path", "action", "reason", "copy_of", "target", "quota")
@@ -42,3 +45,13 @@ def test_the_plugin_and_the_oracle_agree(tmp_path: Path, seed: int) -> None:
     unpack(files, tmp_path)
     problems = differences(tmp_path, folder)
     assert not problems, "\n".join(problems[:15])
+
+
+@pytest.mark.parametrize("name", sorted(edge_files()))
+def test_edge_files_agree_with_the_oracle(name: str) -> None:
+    """The review's edge files (wide and legacy text, the Office family, QuickTime, MPEG-TS, CR3, PDF
+    information, JSON depth, zip end records, …): the plugin and the oracle read each one alike."""
+    data = edge_files()[name]
+    fact = describe(name, data)
+    want = oracle_facts(name, data)
+    assert {field: getattr(fact, field) for field in FACT_FIELDS} == {field: want[field] for field in FACT_FIELDS}
