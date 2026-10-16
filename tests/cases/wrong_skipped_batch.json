@@ -35,6 +35,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "checks failed"
+  "message_contains": "moved-to-rules-path: 5 files are not where the rules put them: Школа/Downloads/Zürich trip 2018-06-11.webp belongs at organized/images/webp/2018/2018-06-11_zurich-trip.webp (still at its old path)"
  }
 }

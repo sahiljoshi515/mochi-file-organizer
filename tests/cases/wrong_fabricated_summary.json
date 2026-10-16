@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "The submitted summary says"
+  "message_contains": "summary-matches: The submitted summary says moved 32; the folder shows moved 31"
  }
 }

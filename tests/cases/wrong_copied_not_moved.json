@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "should not be"
+  "message_contains": "nothing-extra: 1 entry in the folder should not be there: README.md (a second copy of"
  }
 }

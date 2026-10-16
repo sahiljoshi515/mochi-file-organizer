@@ -35,6 +35,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "still there"
+  "message_contains": "duplicates-and-junk-removed: 1 file this run deletes is still there: empty1.txt (empty)"
  }
 }

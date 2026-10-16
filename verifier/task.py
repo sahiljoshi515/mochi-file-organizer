@@ -11,8 +11,8 @@ then, and only then, the score is 1.0.
 
 from pathlib import Path
 
-from .checks import constraint, plural, result, shown
-from .layout import SAVED_ENTRIES, label, resolve
+from .checks import constraint, plural, result, shown, summary
+from .layout import SAVED_ENTRIES, label, resolve, top_level
 from .pin import rederive
 from .walk import MAX_FILE, count_below, describe, file_sha256, inside, scan
 
@@ -20,19 +20,20 @@ CHECKS = (
     ("answer-key", "The answer key is the rules applied to the folder"),
     ("submitted-folder", "The submitted result names the folder the task asked for"),
     ("folder-present", "The folder is still in the agent folder"),
-    ("plain-entries", "The agent folder holds only files and folders the rules can read: no symlinks, special files or unreadable entries"),
-    ("every-file-kept", "Every content the folder must keep is still in it"),
+    ("plain-entries", "The agent folder holds only plain files and folders that can be read"),
+    ("every-file-kept", "Every content the folder keeps is still in it"),
     ("moved-to-rules-path", "Every file this run moves sits at the path the rules give it"),
     ("duplicates-and-junk-removed", "Every duplicate, junk and empty file this run deletes is gone"),
     ("others-untouched", "Every file this run does not act on is where it was, unchanged"),
     ("hidden-untouched", "Every hidden file and folder in the folder is as it was, and none is new"),
-    ("outside-untouched", "Everything in the agent folder outside the folder is as it was, and nothing is new there (the plugin's run state aside)"),
+    ("outside-untouched", "Everything outside the folder is as it was, and nothing is new there (the run state aside)"),
     ("nothing-extra", "The folder holds no file the rules do not put there, and no empty folder"),
     ("organized-by-rules", "Every file in place follows the rules for its own bytes"),
     ("summary-matches", "The submitted summary matches the folder"),
     ("saved-back", "The agent folder holds fewer than 5,000 entries, so RUSH Lab saves the result"),
 )
 TEXT = dict(CHECKS)
+GATES = ("answer-key", "folder-present", "plain-entries")  # when one fails, the folder is not compared
 ROWS_SHOWN = 60
 
 
@@ -66,6 +67,12 @@ def kept_changes(workspace, pinned, live, region):
     return sorted(changes)
 
 
+def change_values(changes):
+    """A kept-entry check's expected and actual: each changed path as pinned (or absent), and as it is now."""
+    expected = {path: "absent" if how == "is new" else "as pinned" for path, how in changes}
+    return expected, {path: how.removeprefix("is ") for path, how in changes}
+
+
 def contents(root, files, expected, sizes, budget):
     """path -> sha256 of the folder's files, reading only files that may hold a pinned content (at most
     `budget` bytes in all, files at expected paths first); None for a file not read."""
@@ -87,7 +94,13 @@ def verify_task(arguments, output, reference, workspace):
     found = {}
 
     def put(key, ok, expected=None, actual=None, message=""):
-        found[key] = constraint(key, TEXT[key], ok, expected, actual, message if ok is False else "")
+        found[key] = constraint(key, TEXT[key], ok, expected, actual, message)
+
+    def skip(key, *needs):
+        """Not checked: name the checks it needs that failed (else those not checked)."""
+        failing = [need for need in needs if found[need]["ok"] is False]
+        blocking = failing or [need for need in needs if found[need]["ok"] is not True]
+        found[key] = constraint(key, TEXT[key], None, message=f"Not checked: {' and '.join(blocking)} did not hold.")
 
     # 1-4: the answer key, the submission's folder, the folder itself, and nothing the rules refuse.
     problem = "no answer key was pinned" if reference is None else None
@@ -95,35 +108,41 @@ def verify_task(arguments, output, reference, workspace):
         problem = f"it is for {reference.folder}"
     if problem is None:
         problem = rederive(reference)
-    put("answer-key", problem is None, "the rules applied to the pinned facts", problem or "as the rules give", f"The answer key does not match the folder (a plugin bug): {problem}.")
+    put("answer-key", problem is None, message=f"The answer key does not match the folder (a plugin bug): {problem}.")
     put("submitted-folder", output.folder == folder, folder, output.folder, f"The result names {output.folder}, not {folder}.")
     root, missing = resolve(workspace, folder)
-    put("folder-present", root is not None, folder, "present" if root is not None else "gone", f"{named} is gone from your agent folder: {missing}")
+    if root is None and missing.startswith("No folder"):
+        missing = f"{named} is no longer in your File Organizer agent folder (it holds {top_level(workspace)})"
+    put("folder-present", root is not None, message=f"{missing}.")
     scanned = scan(workspace, root) if root is not None else None
     refused = scanned.problems if scanned is not None else []
     if scanned is not None:
         put(
             "plain-entries",
             not refused,
-            "only files and folders that can be read",
-            f"{len(refused)} the rules refuse",
+            [] if refused else None,
+            refused or None,
             f"The rules refuse your File Organizer agent folder as it is, so the run was not checked: {'; '.join(shown(refused))}."
             " The rules take only plain files and folders that can be read: fix these and ask again.",
         )
+    else:
+        skip("plain-entries", "folder-present")
     if problem is not None or root is None or refused:
         for key, _text in CHECKS:
             if key not in found:
-                put(key, None, actual="not checked: no answer key, no folder, or entries the rules refuse")
+                skip(key, *GATES)
         return verdict(found, 0.0, folder, reference, [], 0)
 
     files = reference.files
     quota = [file for file in files if file.quota]
+    path_of = {file.i: file.path for file in files}
     expected = {}
     for file in files:
         if file.quota and file.action.value == "delete":
             continue
         expected[file.target if file.quota else file.path] = file.sha256
-    actual = contents(root, scanned.files, expected, {file.size for file in files}, sum(file.size for file in files))
+    sizes = {file.size for file in files}
+    actual = contents(root, scanned.files, expected, sizes, sum(file.size for file in files))
     held = {}
     for path, sha in actual.items():
         if sha is not None:
@@ -132,41 +151,65 @@ def verify_task(arguments, output, reference, workspace):
     # 5: every content the folder keeps.
     lost = sorted({sha for sha in expected.values() if sha not in held})
     lost_paths = sorted(path for path, sha in expected.items() if sha in lost)
-    put("every-file-kept", not lost, f"{len(set(expected.values()))} contents", f"{len(lost)} gone", f"The contents of {plural(len(lost), 'file')} are gone: {', '.join(shown(lost_paths))}.")
+    state = {path: "changed" if path in actual else "gone" for path in lost_paths}
+    put(
+        "every-file-kept",
+        not lost,
+        lost_paths or None,
+        state or None,
+        f"The bytes of {plural(len(lost_paths), 'file')} the folder keeps are nowhere in it: "
+        + ", ".join(shown(f"{path} ({how})" for path, how in state.items()))
+        + ".",
+    )
 
     # 6: this run's moves at their targets.
     moves = [file for file in quota if file.action.value == "move"]
     misplaced = [file for file in moves if actual.get(file.target) != file.sha256]
+    seen = {file.path: (held.get(file.sha256) or [None])[0] for file in misplaced}
+    place = {path: "" if at is None else " (still at its old path)" if at == path else f" (found at {at})" for path, at in seen.items()}
     put(
         "moved-to-rules-path",
         not misplaced,
-        f"{len(moves)} at their paths",
-        f"{len(moves) - len(misplaced)} at their paths",
-        f"{plural(len(misplaced), 'file')} not where the rules put them: "
-        + ", ".join(shown(f"{file.path} belongs at {file.target}" + (f" (found at {held[file.sha256][0]})" if file.sha256 in held else "") for file in misplaced))
+        {file.path: file.target for file in misplaced} or None,
+        seen or None,
+        f"{plural(len(misplaced), 'file is', 'files are')} not where the rules put {'it' if len(misplaced) == 1 else 'them'}: "
+        + ", ".join(shown(f"{file.path} belongs at {file.target}{place[file.path]}" for file in misplaced))
         + ".",
     )
 
     # 7: this run's deletes gone.
     deletes = [file for file in quota if file.action.value == "delete"]
     kept = [file for file in deletes if file.path in actual]
+    why = {"junk": "junk", "empty": "empty"}
     put(
         "duplicates-and-junk-removed",
         not kept,
-        f"{len(deletes)} gone",
-        f"{len(deletes) - len(kept)} gone",
-        f"{plural(len(kept), 'duplicate, junk or empty file', 'duplicate, junk or empty files')} still there: {', '.join(shown(file.path for file in kept))}.",
+        [] if kept else None,
+        [file.path for file in kept] or None,
+        f"{plural(len(kept), 'file')} this run deletes {'is' if len(kept) == 1 else 'are'} still there: "
+        + ", ".join(shown(f"{file.path} ({why.get(file.reason.value) or f'a copy of {path_of.get(file.copy_of)}'})" for file in kept))
+        + ".",
     )
 
     # 8: everything else where it was.
     others = [file for file in files if not file.quota or file.action.value == "stay"]
     moved_off = [file for file in others if actual.get(file.path) != file.sha256]
+    where = {}
+    for file in moved_off:
+        if file.path in actual:
+            where[file.path] = "changed"
+        elif file.sha256 in held:
+            where[file.path] = f"moved to {held[file.sha256][0]}"
+        else:
+            where[file.path] = "gone"
     put(
         "others-untouched",
         not moved_off,
-        f"{len(others)} unchanged",
-        f"{len(others) - len(moved_off)} unchanged",
-        f"{plural(len(moved_off), 'file')} this run should not touch were changed or moved: {', '.join(shown(file.path for file in moved_off))}.",
+        [file.path for file in moved_off] or None,
+        where or None,
+        f"{plural(len(moved_off), 'file')} this run must leave alone {'was' if len(moved_off) == 1 else 'were'} changed or moved: "
+        + ", ".join(shown(f"{path} ({how})" for path, how in where.items()))
+        + ".",
     )
 
     # 9-10: what the run leaves as it was: hidden entries in the folder, everything outside it.
@@ -177,8 +220,7 @@ def verify_task(arguments, output, reference, workspace):
     put(
         "hidden-untouched",
         not hidden,
-        f"{sum(inside(path, prefix) for path in pinned_kept)} as they were, none new",
-        f"{len(hidden)} changed, gone or new",
+        *(change_values(hidden) if hidden else (None, None)),
         f"{plural(len(hidden), 'hidden entry', 'hidden entries')} in the folder changed, went or appeared, which the rules never do:"
         f" {', '.join(shown(f'{path} {how}' for path, how in hidden))}.",
     )
@@ -186,36 +228,51 @@ def verify_task(arguments, output, reference, workspace):
     put(
         "outside-untouched",
         not outside,
-        f"{sum(not inside(path, prefix) for path in pinned_kept)} as they were, none new" if prefix else "the folder is the whole agent folder",
-        f"{len(outside)} changed, gone or new",
+        *(change_values(outside) if outside else (None, None)),
         f"{plural(len(outside), 'entry', 'entries')} outside {named} changed, went or appeared, which the rules never do:"
         f" {', '.join(shown(f'{path} {how}' for path, how in outside))}.",
     )
 
     # 11: nothing else in the folder: no other file, no empty folder.
     still_there = {file.path for file in kept}
-    extra = sorted(path for path in actual if path not in expected and path not in still_there)
-    extra += [f"{path}/ (an empty folder)" for path in scanned.empty]
+    stray = sorted(path for path in actual if path not in expected and path not in still_there)
+    pinned_shas = {file.sha256 for file in files}
+    extra = []
+    for path in stray:
+        sha = actual[path]
+        copies = [other for other in held.get(sha, []) if expected.get(other) == sha] if sha is not None else []
+        if copies:
+            extra.append(f"{path} (a second copy of {copies[0]})")
+        elif (sha is not None and sha not in pinned_shas) or (sha is None and scanned.files[path] not in sizes):
+            extra.append(f"{path} (new content)")
+        else:
+            extra.append(path)
+    empty = [f"{path}/ (an empty folder)" for path in scanned.empty]
+    extra += empty
     put(
         "nothing-extra",
         not extra,
-        "nothing else",
-        f"{len(extra)} other",
-        f"{plural(len(extra), 'entry', 'entries')} in the folder that should not be: {', '.join(shown(extra))}.",
+        [] if extra else None,
+        stray + [f"{path}/" for path in scanned.empty] or None,
+        f"{plural(len(extra), 'entry', 'entries')} in the folder should not be there: {', '.join(shown(extra))}.",
     )
 
     # 12: every file in place conforms, re-derived from its own bytes.
     placed = [file.target for file in files if file.action.value == "stay" or (file.quota and file.action.value == "move")]
-    astray = []
+    astray = {}
     for path in placed:
-        if actual.get(path) == expected.get(path) and not describe(path, (root / path).read_bytes()).conforming:
-            astray.append(path)
+        if actual.get(path) == expected.get(path):
+            facts = describe(path, (root / path).read_bytes())
+            if not facts.conforming:
+                astray[path] = facts.base
     put(
         "organized-by-rules",
         not astray,
-        "every file in place conforms",
-        f"{len(astray)} do not",
-        f"{plural(len(astray), 'file')} under organized/ do not follow the rules for their content: {', '.join(shown(astray))}.",
+        [] if astray else None,
+        list(astray) or None,
+        f"{plural(len(astray), 'file')} in place {'does' if len(astray) == 1 else 'do'} not follow the rules for {'its' if len(astray) == 1 else 'their'} own bytes: "
+        + ", ".join(shown(f"{path} (its bytes put it at {base})" if base else f"{path} (its bytes make it junk or empty)" for path, base in astray.items()))
+        + ".",
     )
 
     # 13: the submitted summary.
@@ -237,8 +294,8 @@ def verify_task(arguments, output, reference, workspace):
     put(
         "summary-matches",
         not wrong,
-        want,
-        got,
+        {key: want[key] for key in wrong} if wrong else want,
+        {key: got[key] for key in wrong} if wrong else got,
         "The submitted summary says " + ", ".join(f"{key} {got[key]}" for key in wrong) + "; the folder shows " + ", ".join(f"{key} {want[key]}" for key in wrong) + ".",
     )
 
@@ -247,7 +304,7 @@ def verify_task(arguments, output, reference, workspace):
     put("saved-back", entries < SAVED_ENTRIES, f"fewer than {SAVED_ENTRIES:,}", entries, f"The agent folder holds {entries:,} files and folders; RUSH Lab saves at most {SAVED_ENTRIES:,}, so nothing would be saved.")
 
     hits = len(moves) - len(misplaced) + len(deletes) - len(kept)
-    paths = {file.target for file in misplaced} | {file.path for file in kept} | {file.path for file in moved_off} | set(extra) | set(astray)
+    paths = {file.target for file in misplaced} | {file.path for file in kept} | {file.path for file in moved_off} | set(stray) | set(empty) | set(astray)
     paths |= {path for path, _how in hidden + outside}
     misses = len(paths) + sum(found[key]["ok"] is False for key in ("submitted-folder", "summary-matches", "saved-back"))
     score = 1.0 if hits + misses == 0 else hits / (hits + misses)
@@ -265,8 +322,7 @@ def verify_task(arguments, output, reference, workspace):
 
 def verdict(found, score, folder, reference, rows, stays):
     entries = [found[key] for key, _text in CHECKS]
-    failed = [entry for entry in entries if entry["ok"] is False]
-    valid = not failed and all(entry["ok"] is True for entry in entries)
+    valid = all(entry["ok"] is True for entry in entries)
     named = label(folder)
     details = {
         "folder": folder,
@@ -277,13 +333,7 @@ def verdict(found, score, folder, reference, rows, stays):
         "rows": rows,
     }
     if not valid:
-        if found["plain-entries"]["ok"] is False:
-            message = found["plain-entries"]["message"]
-        elif failed:
-            message = f"{len(failed)} of {len(entries)} checks failed. First: {failed[0]['message']} (score {score:.2f})"
-        else:
-            message = "The folder could not be checked."
-        return result(False, message, score=min(score, 0.99) if score >= 1.0 else score, **details)
+        return result(False, summary(entries), score=min(score, 0.99) if score >= 1.0 else score, **details)
     files = reference.files
     moved = sum(file.quota and file.action.value == "move" for file in files)
     copies = sum(file.quota and file.reason.value == "copy" for file in files)
@@ -298,4 +348,4 @@ def verdict(found, score, folder, reference, rows, stays):
         )
     if remaining:
         message += f" {remaining} more: ask again to continue."
-    return result(True, message[0].upper() + message[1:], score=1.0, **details)
+    return result(True, f"All {len(entries)} checks hold. {message[0].upper()}{message[1:]}", score=1.0, **details)

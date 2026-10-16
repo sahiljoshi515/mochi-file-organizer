@@ -32,6 +32,8 @@ from plugin import organizer
 
 AGENT = (HERE / "agent.py").read_text(encoding="utf-8")
 FOLDERS = HERE / "folders"
+# A verdict whose agent folder the rules refuse starts so (plain-entries), then names what to fix.
+REFUSED = "plain-entries: The rules refuse your File Organizer agent folder as it is, so the run was not checked: "
 
 
 def rows_for(files: dict[str, bytes], folder: str) -> list[dict]:
@@ -116,19 +118,19 @@ RUN_FACTS = (
     "duplicate = (gone['path'].rpartition('/')[2], (root / moved[rows[gone['i']]['sha256']]).read_bytes())\n"
 )
 TAMPERS = {
-    "hidden_deleted": ("a hidden file the rules leave alone is deleted", "(root / '.git' / 'HEAD').unlink()\n", "hidden entry"),
-    "hidden_modified": ("a hidden file the rules leave alone is changed", "(root / '.vscode' / 'settings.json').write_text('{\"tampered\": true}')\n", "hidden entry"),
-    "hidden_stray_copy": ("a copy of a moved file is left under a hidden name", "(root / '.backup-copy').write_bytes(duplicate[1])\n", "hidden entry"),
-    "duplicate_hidden": ("a duplicate the rules delete ends up under a hidden name instead", "(root / ('.' + duplicate[0])).write_bytes(duplicate[1])\n", "hidden entry"),
-    "duplicate_into_hidden_folder": ("a duplicate the rules delete ends up in a hidden folder instead", "(root / '.trash').mkdir()\n(root / '.trash' / duplicate[0]).write_bytes(duplicate[1])\n", "hidden entr"),
-    "junk_hidden": ("junk the rules delete ends up under a hidden name instead", "(root / '.Thumbs-kept.db').write_bytes(b'junk')\n", "hidden entry"),
-    "outside_deleted": ("a file outside the folder is deleted", "(workspace / 'Notes' / 'keep me.txt').unlink()\n", "outside Downloads"),
-    "outside_modified": ("a file outside the folder is overwritten", "(workspace / 'Notes' / 'keep me.txt').write_text('wiped')\n", "outside Downloads"),
-    "duplicate_moved_outside": ("a duplicate the rules delete is moved out of the folder instead", "(workspace / 'Elsewhere').mkdir()\n(workspace / 'Elsewhere' / duplicate[0]).write_bytes(duplicate[1])\n", "outside Downloads"),
-    "empty_folder_left": ("empty folders are left in the folder", "(root / 'organized' / 'empty-left').mkdir()\n(root / 'old' / 'deeper').mkdir(parents=True)\n", "(an empty folder)"),
-    "junk_replaced_by_folder": ("junk is left as a folder of the same name", "(root / 'Thumbs.db' / 'cache').mkdir(parents=True)\n", "(an empty folder)"),
-    "fifo_added": ("a FIFO appears in the folder", "os.mkfifo(root / 'pipe')\n", "Downloads/pipe is not a regular file or folder"),
-    "unreadable_target": ("a moved file cannot be read at its target", "(root / next(iter(moved.values()))).chmod(0)\n", "cannot be read"),
+    "hidden_deleted": ("a hidden file the rules leave alone is deleted", "(root / '.git' / 'HEAD').unlink()\n", "hidden-untouched: 1 hidden entry in the folder changed, went or appeared, which the rules never do: Downloads/.git/HEAD is gone"),
+    "hidden_modified": ("a hidden file the rules leave alone is changed", "(root / '.vscode' / 'settings.json').write_text('{\"tampered\": true}')\n", "hidden-untouched: 1 hidden entry in the folder changed, went or appeared, which the rules never do: Downloads/.vscode/settings.json changed"),
+    "hidden_stray_copy": ("a copy of a moved file is left under a hidden name", "(root / '.backup-copy').write_bytes(duplicate[1])\n", "hidden-untouched: 1 hidden entry in the folder changed, went or appeared, which the rules never do: Downloads/.backup-copy is new"),
+    "duplicate_hidden": ("a duplicate the rules delete ends up under a hidden name instead", "(root / ('.' + duplicate[0])).write_bytes(duplicate[1])\n", "hidden-untouched: 1 hidden entry"),
+    "duplicate_into_hidden_folder": ("a duplicate the rules delete ends up in a hidden folder instead", "(root / '.trash').mkdir()\n(root / '.trash' / duplicate[0]).write_bytes(duplicate[1])\n", "hidden-untouched: 2 hidden entries"),
+    "junk_hidden": ("junk the rules delete ends up under a hidden name instead", "(root / '.Thumbs-kept.db').write_bytes(b'junk')\n", "hidden-untouched: 1 hidden entry in the folder changed, went or appeared, which the rules never do: Downloads/.Thumbs-kept.db is new"),
+    "outside_deleted": ("a file outside the folder is deleted", "(workspace / 'Notes' / 'keep me.txt').unlink()\n", "outside-untouched: 1 entry outside Downloads changed, went or appeared, which the rules never do: Notes/keep me.txt is gone"),
+    "outside_modified": ("a file outside the folder is overwritten", "(workspace / 'Notes' / 'keep me.txt').write_text('wiped')\n", "outside-untouched: 1 entry outside Downloads changed, went or appeared, which the rules never do: Notes/keep me.txt changed"),
+    "duplicate_moved_outside": ("a duplicate the rules delete is moved out of the folder instead", "(workspace / 'Elsewhere').mkdir()\n(workspace / 'Elsewhere' / duplicate[0]).write_bytes(duplicate[1])\n", "outside-untouched: 2 entries outside Downloads"),
+    "empty_folder_left": ("empty folders are left in the folder", "(root / 'organized' / 'empty-left').mkdir()\n(root / 'old' / 'deeper').mkdir(parents=True)\n", "nothing-extra: 3 entries in the folder should not be there: old/ (an empty folder)"),
+    "junk_replaced_by_folder": ("junk is left as a folder of the same name", "(root / 'Thumbs.db' / 'cache').mkdir(parents=True)\n", "nothing-extra: 2 entries in the folder should not be there: Thumbs.db/ (an empty folder)"),
+    "fifo_added": ("a FIFO appears in the folder", "os.mkfifo(root / 'pipe')\n", REFUSED + "Downloads/pipe is not a regular file or folder"),
+    "unreadable_target": ("a moved file cannot be read at its target", "(root / next(iter(moved.values()))).chmod(0)\n", "cannot be read. The rules take only plain files and folders that can be read"),
     "state_stash_file": (
         "a duplicate the rules delete is kept under the run state's name (the review's rt_state_stash_file2)",
         (
@@ -136,7 +138,7 @@ TAMPERS = {
             "(workspace / '.file-organizer' / 'state.json').write_bytes(duplicate[1])\n"
             "(workspace / '.file-organizer' / 'old.json').unlink()\n"
         ),
-        ".file-organizer/state.json is not this plugin's run state",
+        REFUSED + ".file-organizer/state.json is not this plugin's run state",
     ),
     "state_stash_folder": (
         "the run state is replaced by a folder holding a duplicate, a symlink and a FIFO (the review's rt_state_stash_folder2)",
@@ -148,7 +150,7 @@ TAMPERS = {
             "os.symlink('/etc', state / 'stash' / 'etc-link')\n"
             "os.mkfifo(state / 'pipe')\n"
         ),
-        ".file-organizer/state.json is not a regular file",
+        REFUSED + ".file-organizer/state.json is not a regular file",
     ),
 }
 
@@ -157,7 +159,7 @@ def case(note: str, folder: str, agent_folder: str, flow: list[dict], expect: di
     return {"note": note, "task": "organize-folder", "arguments": {"folder": folder}, "agent_folder": agent_folder, **extra, "steps": flow, "answer": "Done.", "expect": expect}
 
 
-GOLD = {"valid": True, "score_min": 1.0}
+GOLD = {"valid": True, "score_min": 1.0, "message_contains": "All 14 checks hold."}
 
 
 def wrong(contains: str) -> dict:
@@ -204,17 +206,17 @@ def main() -> int:
     whole = messy(23, "small", ".")
     cases["gold_whole_agent_folder"] = case("folder . : the whole agent folder", ".", save_folder("whole", whole), steps("."), GOLD)
 
-    cases["wrong_keeper_wrong"] = case("the last copy of duplicated bytes is kept instead of the first", "Downloads", small_tar, steps("Downloads", "keeper_wrong"), wrong("not where the rules put them"))
-    cases["wrong_duplicate_kept"] = case("a duplicate copy is moved as a file of its own", "Downloads", small_tar, steps("Downloads", "duplicate_kept"), wrong("should not be"))
-    cases["wrong_rank_swapped"] = case("two files sharing a base get each other's numbers", "Downloads", small_tar, steps("Downloads", "rank_swapped"), wrong("not where the rules put them"))
-    cases["wrong_skipped_batch"] = case("the second call is never made", "Downloads", small_tar, steps("Downloads", "skipped_batch"), wrong("checks failed"))
-    cases["wrong_junk_as_move"] = case("a junk row is given as a move (refused) and never deleted", "Downloads", small_tar, steps("Downloads", "junk_as_move"), wrong("still there"))
+    cases["wrong_keeper_wrong"] = case("the last copy of duplicated bytes is kept instead of the first", "Downloads", small_tar, steps("Downloads", "keeper_wrong"), wrong("moved-to-rules-path: 1 file is not where the rules put it: Camera Uploads/backup.svg belongs at organized/images/svg/undated/undated_backup.svg"))
+    cases["wrong_duplicate_kept"] = case("a duplicate copy is moved as a file of its own", "Downloads", small_tar, steps("Downloads", "duplicate_kept"), wrong("nothing-extra: 1 entry in the folder should not be there: organized/images/svg/undated/undated_mega.svg (a second copy of"))
+    cases["wrong_rank_swapped"] = case("two files sharing a base get each other's numbers", "Downloads", small_tar, steps("Downloads", "rank_swapped"), wrong("moved-to-rules-path: 2 files are not where the rules put them"))
+    cases["wrong_skipped_batch"] = case("the second call is never made", "Downloads", small_tar, steps("Downloads", "skipped_batch"), wrong("moved-to-rules-path: 5 files are not where the rules put them: Школа/Downloads/Zürich trip 2018-06-11.webp belongs at organized/images/webp/2018/2018-06-11_zurich-trip.webp (still at its old path)"))
+    cases["wrong_junk_as_move"] = case("a junk row is given as a move (refused) and never deleted", "Downloads", small_tar, steps("Downloads", "junk_as_move"), wrong("duplicates-and-junk-removed: 1 file this run deletes is still there: empty1.txt (empty)"))
     fabricate = "outputs['fake'] = dict(outputs['last']['summary'], moved=outputs['last']['summary']['moved'] + 1)\n"
-    cases["wrong_fabricated_summary"] = case("the submitted summary claims one more move than happened", "Downloads", small_tar, steps("Downloads", after=fabricate, submit="$ref:fake"), wrong("The submitted summary says"))
-    cases["wrong_tamper_after_apply"] = case("a moved file's bytes are changed behind the tools' back", "Downloads", small_tar, steps("Downloads", after=moved_file("Downloads", "target.write_bytes(b'tampered')\n")), wrong("are gone"))
-    cases["wrong_stray_file"] = case("a file the rules never made appears in the folder", "Downloads", small_tar, steps("Downloads", after="(workspace / 'Downloads' / 'stray.txt').write_text('not from the rules')\n"), wrong("should not be"))
-    cases["wrong_copied_not_moved"] = case("a moved file is also copied back to where it was", "Downloads", small_tar, steps("Downloads", after=moved_file("Downloads", "source.parent.mkdir(parents=True, exist_ok=True)\nsource.write_bytes(target.read_bytes())\n")), wrong("should not be"))
-    cases["wrong_out_of_quota"] = case("a number outside this run's rows is used in place of a row, which is left undone", "Downloads", multi_tar, steps("Downloads", "out_of_quota"), wrong("checks failed"))
+    cases["wrong_fabricated_summary"] = case("the submitted summary claims one more move than happened", "Downloads", small_tar, steps("Downloads", after=fabricate, submit="$ref:fake"), wrong("summary-matches: The submitted summary says moved 32; the folder shows moved 31"))
+    cases["wrong_tamper_after_apply"] = case("a moved file's bytes are changed behind the tools' back", "Downloads", small_tar, steps("Downloads", after=moved_file("Downloads", "target.write_bytes(b'tampered')\n")), wrong("every-file-kept: The bytes of 1 file the folder keeps are nowhere in it"))
+    cases["wrong_stray_file"] = case("a file the rules never made appears in the folder", "Downloads", small_tar, steps("Downloads", after="(workspace / 'Downloads' / 'stray.txt').write_text('not from the rules')\n"), wrong("nothing-extra: 1 entry in the folder should not be there: stray.txt (new content)"))
+    cases["wrong_copied_not_moved"] = case("a moved file is also copied back to where it was", "Downloads", small_tar, steps("Downloads", after=moved_file("Downloads", "source.parent.mkdir(parents=True, exist_ok=True)\nsource.write_bytes(target.read_bytes())\n")), wrong("nothing-extra: 1 entry in the folder should not be there: README.md (a second copy of"))
+    cases["wrong_out_of_quota"] = case("a number outside this run's rows is used in place of a row, which is left undone", "Downloads", multi_tar, steps("Downloads", "out_of_quota"), wrong("moved-to-rules-path: 1 file is not where the rules put it: 20070213_日本語メモ.yaml belongs at organized/data/yaml/2007/2007-02-13_file.yaml (still at its old path)"))
 
     for name, (note, tamper, contains) in TAMPERS.items():
         cases[f"wrong_{name}"] = case(note, "Downloads", small_tar, steps("Downloads", after=RUN_FACTS + tamper), wrong(contains))
@@ -250,7 +252,7 @@ def main() -> int:
     links = {"Downloads/a.txt": b"a\n", "Downloads/target.txt": b"t\n", "Other/p1.txt": b"p1\n"}
     nothing = {"folder": "Downloads", "files": 0, "moved": 0, "deleted": 0, "stayed": 0, "left": 0, "remaining": 0}
     refused = [{"tool": "survey", "arguments": {"folder": "Downloads"}, "expect_error": True}, {"tool": "submit", "arguments": nothing}]
-    cases["wrong_symlink_file"] = case("the folder holds a symlink: survey refuses it, and the verdict says the rules refuse the folder", "Downloads", save_folder("symlink-file", links, links={"Downloads/link.txt": "target.txt"}), refused, wrong("Downloads/link.txt is a symlink"))
+    cases["wrong_symlink_file"] = case("the folder holds a symlink: survey refuses it, and the verdict says the rules refuse the folder", "Downloads", save_folder("symlink-file", links, links={"Downloads/link.txt": "target.txt"}), refused, wrong(REFUSED + "Downloads/link.txt is a symlink"))
     locked = [{"python": "(workspace / 'Downloads' / 'a.txt').chmod(0)\n"}, *refused]
     foreign = [{"python": "(workspace / '.file-organizer').mkdir()\n(workspace / '.file-organizer' / 'state.json').write_text('my own notes')\n"}, *refused]
     plain = {"Downloads/a.txt": b"a\n", "Downloads/b.txt": b"b\n"}
@@ -259,7 +261,7 @@ def main() -> int:
         "Downloads",
         save_folder("plain", plain),
         foreign,
-        wrong(".file-organizer/state.json is not this plugin's run state: rename or remove it, then ask again"),
+        wrong(REFUSED + ".file-organizer/state.json is not this plugin's run state: rename or remove it, then ask again"),
     )
     cases["wrong_state_foreign_at_start"] = case(
         "the agent folder holds a member's own file at .file-organizer/state.json: the answer key refuses the folder before the agent starts",
@@ -268,8 +270,8 @@ def main() -> int:
         steps("Downloads"),
         {"error_contains": ".file-organizer/state.json is not this plugin's run state"},
     )
-    cases["wrong_unreadable_input"] = case("a file in the folder cannot be read when the run starts: survey refuses it plainly, and so does the verdict", "Downloads", save_folder("unreadable", {"Downloads/a.txt": b"a\n", "Downloads/b.txt": b"b\n"}), locked, wrong("Downloads/a.txt cannot be read"))
-    cases["wrong_symlink_folder"] = case("the folder holds a symlink to another folder of the member", "Downloads", save_folder("symlink-folder", links, links={"Downloads/linkdir": "../Other"}), refused, wrong("Downloads/linkdir is a symlink"))
+    cases["wrong_unreadable_input"] = case("a file in the folder cannot be read when the run starts: survey refuses it plainly, and so does the verdict", "Downloads", save_folder("unreadable", {"Downloads/a.txt": b"a\n", "Downloads/b.txt": b"b\n"}), locked, wrong(REFUSED + "Downloads/a.txt cannot be read"))
+    cases["wrong_symlink_folder"] = case("the folder holds a symlink to another folder of the member", "Downloads", save_folder("symlink-folder", links, links={"Downloads/linkdir": "../Other"}), refused, wrong(REFUSED + "Downloads/linkdir is a symlink"))
 
     for name, data in cases.items():
         (HERE / f"{name}.json").write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")

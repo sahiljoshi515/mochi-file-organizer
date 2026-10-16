@@ -35,6 +35,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "not where the rules put them"
+  "message_contains": "moved-to-rules-path: 2 files are not where the rules put them"
  }
 }

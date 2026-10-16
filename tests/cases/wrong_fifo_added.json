@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Downloads/pipe is not a regular file or folder"
+  "message_contains": "plain-entries: The rules refuse your File Organizer agent folder as it is, so the run was not checked: Downloads/pipe is not a regular file or folder"
  }
 }

@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "hidden entry"
+  "message_contains": "hidden-untouched: 1 hidden entry in the folder changed, went or appeared, which the rules never do: Downloads/.vscode/settings.json changed"
  }
 }

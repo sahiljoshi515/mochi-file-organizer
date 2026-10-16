@@ -35,6 +35,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "checks failed"
+  "message_contains": "moved-to-rules-path: 1 file is not where the rules put it: 20070213_日本語メモ.yaml belongs at organized/data/yaml/2007/2007-02-13_file.yaml (still at its old path)"
  }
 }

@@ -21,6 +21,7 @@
  "answer": "Done.",
  "expect": {
   "valid": true,
-  "score_min": 1.0
+  "score_min": 1.0,
+  "message_contains": "All 14 checks hold."
  }
 }

@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "are gone"
+  "message_contains": "every-file-kept: The bytes of 1 file the folder keeps are nowhere in it"
  }
 }

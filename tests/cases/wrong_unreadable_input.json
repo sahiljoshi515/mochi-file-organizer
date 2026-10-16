@@ -33,6 +33,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Downloads/a.txt cannot be read"
+  "message_contains": "plain-entries: The rules refuse your File Organizer agent folder as it is, so the run was not checked: Downloads/a.txt cannot be read"
  }
 }

@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "outside Downloads"
+  "message_contains": "outside-untouched: 1 entry outside Downloads changed, went or appeared, which the rules never do: Notes/keep me.txt is gone"
  }
 }

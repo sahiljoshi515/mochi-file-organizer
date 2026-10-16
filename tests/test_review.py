@@ -282,7 +282,7 @@ def test_fo04_a_symlink_is_refused_and_the_verdict_says_so(tmp_path: Path, link:
     nothing = OrganizeOutput(folder=FOLDER, files=0, moved=0, deleted=0, stayed=0, left=0, remaining=0)
     verdict = judge(workspace, reference, nothing, FOLDER)
     assert not verdict["valid"] and verdict["score"] == 0.0
-    assert verdict["message"].startswith("The rules refuse your File Organizer agent folder as it is") and f"{name} is a symlink" in verdict["message"]
+    assert verdict["message"].startswith("plain-entries: The rules refuse your File Organizer agent folder as it is") and f"{name} is a symlink" in verdict["message"]
     assert failed(verdict) == ["plain-entries"]  # nothing blames the agent
 
 

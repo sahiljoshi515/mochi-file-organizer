@@ -35,6 +35,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "not where the rules put them"
+  "message_contains": "moved-to-rules-path: 1 file is not where the rules put it: Camera Uploads/backup.svg belongs at organized/images/svg/undated/undated_backup.svg"
  }
 }

@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "outside Downloads"
+  "message_contains": "outside-untouched: 2 entries outside Downloads"
  }
 }

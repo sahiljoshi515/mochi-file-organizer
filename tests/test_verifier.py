@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import shutil
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from messy import messy, unpack
 import verifier
 from contract import ApplyInput, Move, OrganizeInput, OrganizeOutput
 from plugin import organizer
+from verifier.task import CHECKS
 
 TASK = "organize-folder"
 FOLDER = "Downloads"
@@ -72,7 +74,7 @@ def test_a_gold_run_holds_every_constraint(gold) -> None:
         "organized-by-rules", "summary-matches", "saved-back",
     ]  # fmt: skip
     assert all(entry["ok"] is True for entry in verdict["details"]["constraints"])
-    assert verdict["message"].startswith("Organized Downloads: moved ")
+    assert verdict["message"].startswith("All 14 checks hold. Organized Downloads: moved ")
     assert len(verdict["details"]["rows"]) == reference.quota and all(row["ok"] for row in verdict["details"]["rows"])
 
 
@@ -174,13 +176,47 @@ def test_each_constraint_fails_when_broken_and_the_score_drops(gold, constraint:
     assert not verdict["valid"] and verdict["score"] < 1.0, verdict["message"]
     assert constraint in failed(verdict), (failed(verdict), verdict["message"])
     if constraint == "plain-entries":
-        assert verdict["message"].startswith("The rules refuse your File Organizer agent folder as it is") and "link.txt is a symlink" in verdict["message"]
+        assert verdict["message"].startswith("plain-entries: The rules refuse your File Organizer agent folder as it is") and "link.txt is a symlink" in verdict["message"]
     else:
-        assert "checks failed" in verdict["message"]
+        assert verdict["message"].startswith(f"{failed(verdict)[0]}: ")
     if constraint in ("answer-key", "folder-present", "plain-entries"):
         assert verdict["score"] == 0.0
         first = ("answer-key", "submitted-folder", "folder-present", "plain-entries")
         assert all(entry["ok"] is None for entry in verdict["details"]["constraints"] if entry["id"] not in first)
+    assert_plain_entries(verdict)
+
+
+ENTRY_KEYS = {"id", "constraint", "ok", "expected", "actual", "message"}
+
+
+def assert_plain_entries(verdict: dict) -> None:
+    """Every entry has the same keys; a failure says why, a skipped check names an earlier one that did not
+    hold, and the verdict's message is the first failure's, then how many more fail."""
+    entries = verdict["details"]["constraints"]
+    order = [entry["id"] for entry in entries]
+    for position, entry in enumerate(entries):
+        assert set(entry) == ENTRY_KEYS, entry
+        assert (entry["message"] == "") == (entry["ok"] is True), entry
+        if entry["ok"] is None:
+            blocking = entry["message"].removeprefix("Not checked: ").removesuffix(" did not hold.").split(" and ")
+            assert entry["message"].startswith("Not checked: ") and all(name in order[:position] for name in blocking), entry
+            assert all(entries[order.index(name)]["ok"] is not True for name in blocking), entry
+    wrong = [entry for entry in entries if entry["ok"] is False]
+    if wrong:
+        more = f" (+{len(wrong) - 1} more)" if len(wrong) > 1 else ""
+        assert verdict["message"] == f"{wrong[0]['id']}: {wrong[0]['message'].removesuffix('.')}{more}"
+
+
+def test_a_gold_verdict_has_plain_entries(gold) -> None:
+    verdict = judge(*gold)
+    assert_plain_entries(verdict)
+    assert all(entry["expected"] is None and entry["actual"] is None for entry in verdict["details"]["constraints"][4:12])
+
+
+def test_the_readme_lists_every_constraint_as_the_verifier_names_it() -> None:
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\| (\d+) \| `([a-z-]+)` \| ([^|]+) \| ", readme, re.MULTILINE)
+    assert [(int(number), name, text.strip()) for number, name, text in rows] == [(number, *entry) for number, entry in enumerate(CHECKS, 1)]
 
 
 def test_others_untouched_fails_when_a_file_beyond_the_quota_changes(tmp_path: Path) -> None:
@@ -288,7 +324,7 @@ def test_an_empty_quota_is_valid_only_with_a_true_summary(tmp_path: Path) -> Non
     files = {"Done/organized/documents/txt/undated/undated_a.txt": b"a\n"}
     workspace, reference, output = run(tmp_path, files, folder="Done")
     verdict = judge(workspace, reference, output, folder="Done")
-    assert verdict["valid"] and verdict["message"] == "Done is already organized: its one file is in place."
+    assert verdict["valid"] and verdict["message"] == "All 14 checks hold. Done is already organized: its one file is in place."
     fake = OrganizeOutput(folder="Done", files=1, moved=1, deleted=0, stayed=1, left=0, remaining=0)
     assert not judge(workspace, reference, fake, folder="Done")["valid"]
 

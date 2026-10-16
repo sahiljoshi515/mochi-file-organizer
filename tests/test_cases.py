@@ -19,7 +19,8 @@ import verifier
 from contract import TASKS, TOOLS, OrganizeInput, Task, Tool
 from plugin import organizer
 
-CASES = sorted((Path(__file__).resolve().parent / "cases").glob("*.json"))
+CASES_DIR = Path(__file__).resolve().parent / "cases"
+CASES = sorted(CASES_DIR.glob("*.json"))
 IMPLEMENTATIONS = {Tool.PIN_LAYOUT: organizer.pin_layout, Tool.SURVEY: organizer.survey, Tool.APPLY: organizer.apply}
 
 
@@ -55,24 +56,25 @@ def call(tool: Tool, arguments: dict, workspace: Path):
     return output
 
 
-@pytest.mark.parametrize("case_path", CASES, ids=[path.stem for path in CASES])
-def test_case(tmp_path: Path, case_path: Path) -> None:
-    case = json.loads(case_path.read_text(encoding="utf-8"))
+def staged(case: dict, tmp_path: Path) -> tuple[Path, Path]:
+    """The case's agent folder unpacked as the workspace, and the scratch copy the reference pins from."""
     workspace, scratch = tmp_path / "workspace", tmp_path / "scratch"
-    workspace.mkdir()
-    with tarfile.open(case_path.parent / case["agent_folder"]) as archive:
+    workspace.mkdir(parents=True)
+    with tarfile.open(CASES_DIR / case["agent_folder"]) as archive:
         archive.extractall(workspace, filter="data")
     if case.get("mtimes") == "scrambled":
         scramble(workspace, "workspace")
     shutil.copytree(workspace, scratch)
     if case.get("mtimes") == "scrambled":
         scramble(scratch, "scratch")
-    arguments = OrganizeInput(**case["arguments"])
+    return workspace, scratch
+
+
+def played(case: dict, tmp_path: Path) -> tuple[dict, dict]:
+    """(the verdict, the submitted summary as JSON) of a case whose answer key can be pinned, run as the
+    host runs it."""
+    workspace, scratch = staged(case, tmp_path)
     organizer.RUN = None
-    if "error_contains" in case["expect"]:  # refused before the agent starts: the answer key cannot be pinned
-        with pytest.raises(ValueError, match=re.escape(case["expect"]["error_contains"])):
-            call(Tool.PIN_LAYOUT, case["arguments"], scratch)
-        return
     reference = call(Tool.PIN_LAYOUT, case["arguments"], scratch)
     organizer.RUN = None  # the agent's own plugin process
     outputs: dict = {}
@@ -96,8 +98,21 @@ def test_case(tmp_path: Path, case_path: Path) -> None:
     finally:
         organizer.RUN = None
     assert submitted is not None, "the case never submits"
-    verdict = verifier.verify_task(Task.ORGANIZE_FOLDER.value, arguments, submitted, reference, str(workspace))
+    verdict = verifier.verify_task(Task.ORGANIZE_FOLDER.value, OrganizeInput(**case["arguments"]), submitted, reference, str(workspace))
+    return verdict, plain_output(submitted)
+
+
+@pytest.mark.parametrize("case_path", CASES, ids=[path.stem for path in CASES])
+def test_case(tmp_path: Path, case_path: Path) -> None:
+    case = json.loads(case_path.read_text(encoding="utf-8"))
     expect = case["expect"]
+    if "error_contains" in expect:  # refused before the agent starts: the answer key cannot be pinned
+        _workspace, scratch = staged(case, tmp_path)
+        organizer.RUN = None
+        with pytest.raises(ValueError, match=re.escape(expect["error_contains"])):
+            call(Tool.PIN_LAYOUT, case["arguments"], scratch)
+        return
+    verdict, _submitted = played(case, tmp_path)
     assert verdict["valid"] == expect["valid"], verdict["message"]
     assert verdict["score"] >= expect.get("score_min", 0.0) and verdict["score"] <= expect.get("score_max", 1.0), verdict["message"]
     assert expect.get("message_contains", "") in verdict["message"], verdict["message"]

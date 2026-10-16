@@ -38,7 +38,7 @@ def main() -> int:
         written += 1
         if seed < 2:
             stray = f"({build_cases.root_code(folder)} / 'stray.txt').write_text('stray')\n"
-            bad = build_cases.case("real files, a stray file left", folder, agent_folder, build_cases.steps(folder, after=stray), build_cases.wrong("should not be"))
+            bad = build_cases.case("real files, a stray file left", folder, agent_folder, build_cases.steps(folder, after=stray), build_cases.wrong("nothing-extra: 1 entry in the folder should not be there: stray.txt"))
             (out / f"real_wrong_stray_{seed}.json").write_text(json.dumps(bad, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
             written += 1
     print(f"wrote {written} cases to {out}")

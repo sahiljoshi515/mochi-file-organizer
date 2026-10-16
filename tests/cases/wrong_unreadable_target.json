@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "cannot be read"
+  "message_contains": "cannot be read. The rules take only plain files and folders that can be read"
  }
 }
