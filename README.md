@@ -115,13 +115,29 @@ uv run ruff check .
 ```
 
 Run the task exactly as NanoAgent does, with a scripted agent instead of a model, through the lab's
-harness (`scripted_task.py` from the RUSH Lab plugin tooling):
+harness (`scripted_task.py` and `run_cases.py` from the RUSH Lab plugin tooling, run with NanoAgent's
+Python):
 
 ```bash
-python scripted_task.py . tests/cases/gold_small.json --sandbox seatbelt
+python scripted_task.py . tests/cases/gold_small.json --sandbox seatbelt   # one case
+python run_cases.py . tests/cases --jobs 4 --sandbox seatbelt              # all 19, with timings
+uv run python tests/corpus/real_cases.py /tmp/real-cases 9                 # cases on real-file folders
+python run_cases.py . /tmp/real-cases --sandbox seatbelt
 ```
 
-`tests/cases/build_cases.py` rebuilds every case and its folder from the builders, deterministically.
+Each case unpacks an agent folder (`tests/cases/folders/*.tar.gz`), lets the reference pin the answer
+key from a copy of it, then runs `survey`, a python step that decides the rows exactly as the
+instructions say (`tests/cases/agent.py`), `apply` twice and `submit`. The 9 gold cases must be valid at
+1.0; each of the 10 wrong cases makes one mistake (keeping the wrong copy, moving a duplicate, swapping
+collision numbers, skipping a call, moving junk, a false summary, tampering, a stray file, a copy left
+behind, a number outside the run) and must fail the constraint it breaks. `tests/test_cases.py` replays
+them all without NanoAgent. `tests/cases/build_cases.py` rebuilds every case and its folder from the
+builders, deterministically.
+
+The real-file corpus (`tests/corpus/sources.json`: 38 files, 2.5 MB) comes from the Pillow and
+pillow-heif test images, Apache POI, LibreOffice, web-platform-tests, Project Gutenberg, pdf.js, the IRS,
+CPython, Data Packages, the Jekyll docs and PyPI; each keeps its own licence, listed per file, and is
+downloaded at test time, never committed.
 
 ## Limitations
 
