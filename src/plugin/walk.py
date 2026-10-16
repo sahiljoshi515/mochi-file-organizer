@@ -8,12 +8,13 @@ Shared, byte for byte, by src/plugin/ and verifier/: it reads files with pathlib
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 from .meta import embedded
 from .naming import base_path, claimed_ext, conforms, is_hidden, is_junk, name_facts
-from .sniff import as_text, sniff
+from .sniff import JSON_DEPTH, as_text, json_depth, sniff
 
 MAX_FILES = 1000
 MAX_BYTES = 200 * 1024 * 1024
@@ -24,6 +25,8 @@ MAX_ENTRIES = 4900
 MAX_AGENT_BYTES = 1024 * 1024 * 1024
 STATE_DIR = ".file-organizer"
 STATE_FILE = "state.json"
+STATE_FIELDS = frozenset(["version", "token", "folder", "hash_length", "taken", "rows", "applied", "calls", "summary"])
+STATE_BYTES = 16 * 1024 * 1024  # the plugin's run state is far smaller: a larger file is not it
 NAME_SOURCE = "name"
 NO_DATE = "none"
 KIND_BITS, FOLDER_BITS, FILE_BITS, LINK_BITS = 0o170000, 0o040000, 0o100000, 0o120000
@@ -139,6 +142,19 @@ def parents(path: str) -> list[str]:
     return ["/".join(parts[:end]) for end in range(1, len(parts))]
 
 
+def run_state(path: Path) -> dict | None:
+    """The plugin's run state in the file at `path`: a JSON object (at most 16 MiB, nested at most 512
+    deep) with every run-state field; None for anything else, or when it cannot be read."""
+    try:
+        if path.lstat().st_size > STATE_BYTES:
+            return None
+        text = path.read_text(encoding="utf-8")
+        state = json.loads(text) if json_depth(text) <= JSON_DEPTH else None
+    except (OSError, ValueError, RecursionError):
+        return None
+    return state if isinstance(state, dict) and STATE_FIELDS <= set(state) else None
+
+
 def scan(workspace: Path, root: Path) -> Scan:
     """Walk the whole agent folder `workspace` by RULES §1. `root` is the folder to organize in it."""
     prefix = "" if root == workspace else root.relative_to(workspace).as_posix()
@@ -180,6 +196,8 @@ def scan(workspace: Path, root: Path) -> Scan:
             if place == STATE and at == STATE_DIR + "/" and entry.name == STATE_FILE:
                 if kind != "file":
                     problems.append(f"{path} is not a regular file, but the plugin keeps its run state there")
+                elif run_state(entry) is None:
+                    problems.append(f"{path} is not this plugin's run state: rename or remove it, then ask again")
                 continue
             total += size
             if place == OUTSIDE and path == prefix:

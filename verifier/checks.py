@@ -1,10 +1,8 @@
 """Verdict shapes shared by the tool checks and the task check, and reading the plugin's run state."""
 
-import json
 from pathlib import Path
 
-from .sniff import JSON_DEPTH, json_depth
-from .walk import STATE_DIR, STATE_FILE
+from .walk import STATE_DIR, STATE_FILE, run_state
 
 SHOWN = 10
 
@@ -34,17 +32,9 @@ def plural(count, one, many=None):
 
 
 def read_state(workspace):
-    """The plugin's run state (.file-organizer/state.json), or None when it is missing or not readable."""
+    """The plugin's run state (.file-organizer/state.json), or None when it is missing or not the run state."""
     path = Path(workspace) / STATE_DIR / STATE_FILE
-    if not path.is_file():
-        return None
-    try:
-        text = path.read_text(encoding="utf-8")
-        state = json.loads(text) if json_depth(text) <= JSON_DEPTH else None
-    except (ValueError, RecursionError):
-        return None
-    keys = {"version", "token", "folder", "hash_length", "taken", "rows", "applied", "calls", "summary"}
-    return state if isinstance(state, dict) and keys <= set(state) else None
+    return run_state(path) if path.is_file() else None
 
 
 def summary_dict(value):

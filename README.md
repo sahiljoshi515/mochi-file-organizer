@@ -130,7 +130,7 @@ Python):
 
 ```bash
 python scripted_task.py . tests/cases/gold_small.json --sandbox seatbelt   # one case
-python run_cases.py . tests/cases --jobs 4 --sandbox seatbelt              # all 40, with timings
+python run_cases.py . tests/cases --jobs 4 --sandbox seatbelt              # all 42, with timings
 uv run python tests/corpus/real_cases.py /tmp/real-cases 9                 # cases on real-file folders
 python run_cases.py . /tmp/real-cases --sandbox seatbelt
 ```
@@ -138,11 +138,12 @@ python run_cases.py . /tmp/real-cases --sandbox seatbelt
 Each case unpacks an agent folder (`tests/cases/folders/*.tar.gz`), lets the reference pin the answer
 key from a copy of it, then runs `survey`, a python step that decides the rows exactly as the
 instructions say (`tests/cases/agent.py`), `apply` twice and `submit`. The 12 gold cases must be valid
-at 1.0; each of the 28 wrong cases makes one mistake (keeping the wrong copy, moving a duplicate,
+at 1.0; each of the 30 wrong cases makes one mistake (keeping the wrong copy, moving a duplicate,
 swapping collision numbers, skipping a call, moving junk, a false summary, tampering, a stray file, a
 copy left behind, a number outside the run; and the review's red team: hidden entries changed, removed
 or added, files outside the folder changed or added, empty folders left, a FIFO, an unreadable file, a
-symlink in the folder, a duplicate or a folder stashed at the run state's path) and must fail the constraint it breaks. `tests/test_cases.py` replays them all
+symlink in the folder, a duplicate or a folder stashed at the run state's path, a member's own file
+where the run state goes) and must fail the constraint it breaks. `tests/test_cases.py` replays them all
 without NanoAgent. `tests/cases/build_cases.py` rebuilds every case and its folder from the
 builders, deterministically.
 

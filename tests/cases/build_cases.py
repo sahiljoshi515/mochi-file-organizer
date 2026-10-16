@@ -136,7 +136,7 @@ TAMPERS = {
             "(workspace / '.file-organizer' / 'state.json').write_bytes(duplicate[1])\n"
             "(workspace / '.file-organizer' / 'old.json').unlink()\n"
         ),
-        ".file-organizer/state.json is not the run state the plugin writes",
+        ".file-organizer/state.json is not this plugin's run state",
     ),
     "state_stash_folder": (
         "the run state is replaced by a folder holding a duplicate, a symlink and a FIFO (the review's rt_state_stash_folder2)",
@@ -252,6 +252,22 @@ def main() -> int:
     refused = [{"tool": "survey", "arguments": {"folder": "Downloads"}, "expect_error": True}, {"tool": "submit", "arguments": nothing}]
     cases["wrong_symlink_file"] = case("the folder holds a symlink: survey refuses it, and the verdict says the rules refuse the folder", "Downloads", save_folder("symlink-file", links, links={"Downloads/link.txt": "target.txt"}), refused, wrong("Downloads/link.txt is a symlink"))
     locked = [{"python": "(workspace / 'Downloads' / 'a.txt').chmod(0)\n"}, *refused]
+    foreign = [{"python": "(workspace / '.file-organizer').mkdir()\n(workspace / '.file-organizer' / 'state.json').write_text('my own notes')\n"}, *refused]
+    plain = {"Downloads/a.txt": b"a\n", "Downloads/b.txt": b"b\n"}
+    cases["wrong_state_foreign"] = case(
+        "a member's own file appears at .file-organizer/state.json: survey refuses to overwrite it, and the verdict says so",
+        "Downloads",
+        save_folder("plain", plain),
+        foreign,
+        wrong(".file-organizer/state.json is not this plugin's run state: rename or remove it, then ask again"),
+    )
+    cases["wrong_state_foreign_at_start"] = case(
+        "the agent folder holds a member's own file at .file-organizer/state.json: the answer key refuses the folder before the agent starts",
+        "Downloads",
+        save_folder("state-foreign", {**plain, ".file-organizer/state.json": b"my own notes\n"}),
+        steps("Downloads"),
+        {"error_contains": ".file-organizer/state.json is not this plugin's run state"},
+    )
     cases["wrong_unreadable_input"] = case("a file in the folder cannot be read when the run starts: survey refuses it plainly, and so does the verdict", "Downloads", save_folder("unreadable", {"Downloads/a.txt": b"a\n", "Downloads/b.txt": b"b\n"}), locked, wrong("Downloads/a.txt cannot be read"))
     cases["wrong_symlink_folder"] = case("the folder holds a symlink to another folder of the member", "Downloads", save_folder("symlink-folder", links, links={"Downloads/linkdir": "../Other"}), refused, wrong("Downloads/linkdir is a symlink"))
 

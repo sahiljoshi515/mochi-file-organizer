@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import shutil
 import tarfile
 from pathlib import Path
@@ -68,6 +69,10 @@ def test_case(tmp_path: Path, case_path: Path) -> None:
         scramble(scratch, "scratch")
     arguments = OrganizeInput(**case["arguments"])
     organizer.RUN = None
+    if "error_contains" in case["expect"]:  # refused before the agent starts: the answer key cannot be pinned
+        with pytest.raises(ValueError, match=re.escape(case["expect"]["error_contains"])):
+            call(Tool.PIN_LAYOUT, case["arguments"], scratch)
+        return
     reference = call(Tool.PIN_LAYOUT, case["arguments"], scratch)
     organizer.RUN = None  # the agent's own plugin process
     outputs: dict = {}
@@ -114,6 +119,7 @@ def test_the_cases_cover_every_wrong_row() -> None:
         "hidden_deleted", "hidden_modified", "hidden_stray_copy", "duplicate_hidden", "duplicate_into_hidden_folder", "junk_hidden",
         "outside_deleted", "outside_modified", "duplicate_moved_outside", "empty_folder_left", "junk_replaced_by_folder",
         "fifo_added", "unreadable_target", "unreadable_input", "symlink_file", "symlink_folder", "state_stash_file", "state_stash_folder",
+        "state_foreign", "state_foreign_at_start",
     ):  # fmt: skip
         assert f"wrong_{tamper}" in names  # the review's red team (FO-01 to FO-05)
     assert sum(name.startswith("gold_") for name in names) >= 7

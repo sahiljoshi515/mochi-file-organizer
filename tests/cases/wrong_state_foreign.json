@@ -1,0 +1,38 @@
+{
+ "note": "a member's own file appears at .file-organizer/state.json: survey refuses to overwrite it, and the verdict says so",
+ "task": "organize-folder",
+ "arguments": {
+  "folder": "Downloads"
+ },
+ "agent_folder": "folders/plain.tar.gz",
+ "steps": [
+  {
+   "python": "(workspace / '.file-organizer').mkdir()\n(workspace / '.file-organizer' / 'state.json').write_text('my own notes')\n"
+  },
+  {
+   "tool": "survey",
+   "arguments": {
+    "folder": "Downloads"
+   },
+   "expect_error": true
+  },
+  {
+   "tool": "submit",
+   "arguments": {
+    "folder": "Downloads",
+    "files": 0,
+    "moved": 0,
+    "deleted": 0,
+    "stayed": 0,
+    "left": 0,
+    "remaining": 0
+   }
+  }
+ ],
+ "answer": "Done.",
+ "expect": {
+  "valid": false,
+  "score_max": 0.99,
+  "message_contains": ".file-organizer/state.json is not this plugin's run state: rename or remove it, then ask again"
+ }
+}

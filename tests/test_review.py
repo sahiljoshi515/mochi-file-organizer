@@ -176,13 +176,16 @@ def state_not_a_run_state(workspace, _output):
     (workspace / ".file-organizer/state.json").write_text("{}")
 
 
+STATE_REFUSED = ".file-organizer/state.json is not this plugin's run state: rename or remove it, then ask again"
+
+
 @pytest.mark.parametrize("tamper", [duplicate_onto_state, state_not_a_run_state])
 def test_r2_01_state_json_must_hold_the_run_state(tmp_path: Path, tamper) -> None:
     verdict = after(tmp_path, tamper)
-    assert failed(verdict) == ["outside-untouched"] and ".file-organizer/state.json is not the run state the plugin writes" in verdict["message"]
+    assert failed(verdict) == ["plain-entries"] and verdict["score"] == 0.0 and STATE_REFUSED in verdict["message"]
     files = {path.removeprefix("Downloads/"): data for path, data in base_folder().items()}
     whole = after(tmp_path / "whole", tamper, files, ".")
-    assert failed(whole) == ["hidden-untouched"], whole["message"]
+    assert failed(whole) == ["plain-entries"] and STATE_REFUSED in whole["message"]
 
 
 def state_replaced_by_folder(workspace, _output):
@@ -629,3 +632,32 @@ def test_r2_02_the_costliest_files_describe_in_bounded_time() -> None:
     started = time.perf_counter()
     describe("dense-meta.docx", next(iter(dense.values())))  # 1.5 s before the limits; now the first 4,096 bytes
     assert time.perf_counter() - started < 0.05
+
+
+# ----- R3-01: a state.json the plugin did not write is refused, not overwritten -----
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"my own notes, which happen to live here\n",  # a member's own file
+        b'{"version": 1, "token": "0", "folder": "Downloads", "hash_length": 12, "taken": [], "rows": [',  # a truncated state
+        b'{"version": 1, "folder": "Downloads"}',  # JSON, but not the run state
+        b"[" * 600 + b"]" * 600,  # nested past 512
+    ],
+)
+def test_r3_01_a_state_json_that_is_not_the_run_state_is_refused(tmp_path: Path, content: bytes) -> None:
+    unpack({**base_folder(), ".file-organizer/state.json": content}, tmp_path)
+    for tool in (organizer.pin_layout, organizer.survey):
+        organizer.RUN = None
+        with pytest.raises(ValueError, match="state.json is not this plugin's run state: rename or remove it, then ask again"):
+            tool(OrganizeInput(folder=FOLDER), tmp_path)
+    assert (tmp_path / ".file-organizer/state.json").read_bytes() == content  # left as it was
+
+
+def test_r3_01_an_earlier_runs_state_is_the_plugins_to_rewrite(tmp_path: Path) -> None:
+    workspace, _reference, _output = host_run(tmp_path, base_folder(), FOLDER)
+    earlier = (workspace / ".file-organizer/state.json").read_bytes()
+    organizer.RUN = None
+    organizer.survey(OrganizeInput(folder=FOLDER), workspace)  # the next run starts from the earlier run's state
+    assert (workspace / ".file-organizer/state.json").read_bytes() != earlier

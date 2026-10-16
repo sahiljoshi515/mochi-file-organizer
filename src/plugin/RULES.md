@@ -20,11 +20,10 @@ one name equal to it in Unicode NFC form names it); `.` names your whole agent f
   junk names included) is **left exactly as it was**: never moved, changed or deleted, and no new
   hidden file or folder may appear anywhere in the folder.
 - **Everything outside the folder** in your agent folder is also left exactly as it was, and nothing
-  new may appear there. The one exception is the plugin's own run state: a regular file
-  `.file-organizer/state.json` at the top of your agent folder that holds the run state the plugin
-  writes (a JSON object with the fields `version`, `token`, `folder`, `hash_length`, `taken`, `rows`,
-  `applied`, `calls` and `summary`) or is absent, and the `.file-organizer/` folder that holds it.
-  Anything else in that folder is left exactly as it was too.
+  new may appear there. The one exception is the plugin's own run state,
+  `.file-organizer/state.json` at the top of your agent folder, which the plugin writes and rewrites,
+  and the `.file-organizer/` folder that holds it; anything else in that folder is left exactly as it
+  was too.
 - Every other regular file in the folder takes part. Archives are never unpacked. A path's depth is
   its number of `/`.
 - **Refused** before anything happens, with a message that says what to fix:
@@ -32,8 +31,11 @@ one name equal to it in Unicode NFC form names it); `.` names your whole agent f
     anywhere in your agent folder, `.file-organizer/` included;
   - a file or folder there that cannot be read: a file whose owner may not read it, a folder whose
     owner may not open it (read and search), or anything whose reading fails;
-  - a `.file-organizer` at the top of your agent folder that is not a folder, or a
-    `.file-organizer/state.json` that is not a regular file;
+  - a `.file-organizer` at the top of your agent folder that is not a folder;
+  - a `.file-organizer/state.json` that is not this plugin's run state (a regular file of at most 16 MiB
+    holding a JSON object, nested at most 512 deep, with the fields `version`, `token`, `folder`,
+    `hash_length`, `taken`, `rows`, `applied`, `calls` and `summary`), because the plugin would
+    overwrite it;
   - more than 1,000 files that take part, more than 200 MiB of them, or one over 10 MiB;
   - more than 1 GiB in your whole agent folder (every file there is read to check the run);
   - a file that takes part deeper than 12 folders, or with a path longer than 300 characters

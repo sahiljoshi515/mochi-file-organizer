@@ -38,6 +38,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": ".file-organizer/state.json is not the run state the plugin writes"
+  "message_contains": ".file-organizer/state.json is not this plugin's run state"
  }
 }

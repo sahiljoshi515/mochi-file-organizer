@@ -11,10 +11,10 @@ then, and only then, the score is 1.0.
 
 from pathlib import Path
 
-from .checks import constraint, plural, read_state, result, shown
+from .checks import constraint, plural, result, shown
 from .layout import SAVED_ENTRIES, label, resolve
 from .pin import rederive
-from .walk import MAX_FILE, STATE_DIR, STATE_FILE, count_below, describe, file_sha256, inside, scan
+from .walk import MAX_FILE, count_below, describe, file_sha256, inside, scan
 
 CHECKS = (
     ("answer-key", "The answer key is the rules applied to the folder"),
@@ -64,15 +64,6 @@ def kept_changes(workspace, pinned, live, region):
             changes.append((path, "changed"))
     changes += [(path, "is new") for path in live if region(path) and path not in pinned]
     return sorted(changes)
-
-
-def state_change(workspace):
-    """The run state is exempt only as itself: a `.file-organizer/state.json` that is there must hold the
-    run state the plugin writes, or it hides something the rules never put there."""
-    path = Path(workspace) / STATE_DIR / STATE_FILE
-    if not path.is_file() or read_state(workspace) is not None:
-        return []
-    return [(f"{STATE_DIR}/{STATE_FILE}", "is not the run state the plugin writes")]
 
 
 def contents(root, files, expected, sizes, budget):
@@ -183,9 +174,6 @@ def verify_task(arguments, output, reference, workspace):
     live_kept = {entry.path: entry for entry in scanned.kept}
     prefix = scanned.prefix
     hidden = kept_changes(workspace, pinned_kept, live_kept, lambda path: inside(path, prefix))
-    stashed = state_change(workspace)
-    if not prefix:
-        hidden = sorted(hidden + stashed)
     put(
         "hidden-untouched",
         not hidden,
@@ -195,8 +183,6 @@ def verify_task(arguments, output, reference, workspace):
         f" {', '.join(shown(f'{path} {how}' for path, how in hidden))}.",
     )
     outside = kept_changes(workspace, pinned_kept, live_kept, lambda path: not inside(path, prefix))
-    if prefix:
-        outside = sorted(outside + stashed)
     put(
         "outside-untouched",
         not outside,
